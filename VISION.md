@@ -49,7 +49,7 @@ AI employees can collaborate with each other and with humans. Your AI customer s
 - Service businesses (agencies, consultancies) that need to scale operations
 - E-commerce businesses managing customer inquiries and operations on WhatsApp
 
-The dogfooding approach will help us discover the ideal customer: we'll use Journeyman to run Volund Ventures itself and productize what works.
+The dogfooding approach will help us discover the ideal customer: **Journeyman's first AI employee runs the Journeyman startup itself.** The product is its own first customer. If it can run its own operations, that's the ultimate proof of concept.
 
 ## Business Model
 
@@ -82,31 +82,58 @@ Over time, as trust builds, users naturally increase autonomy -- just like with 
 
 ## Technical Architecture
 
+### The Full Platform
+
+Journeyman is a **two-surface platform**:
+
+1. **Web App** (Next.js) -- Where customers sign up, onboard their company, create AI employees, manage tasks, monitor activity, and handle billing. This is the control plane.
+2. **WhatsApp** (Baileys → Cloud API) -- Where AI employees actually work. The primary interaction surface. Assigning tasks, getting results, approving actions -- all happens in chat.
+
+### Smart Agent Orchestration
+
+Running every task through the most powerful model (Claude Opus 4.6) would cost ~$2,000/month at scale. That makes a $49/employee product unsustainable. Instead, we use **tiered model routing**:
+
+| Task Complexity | Model | Cost | Speed | Examples |
+|----------------|-------|------|-------|----------|
+| Simple | Haiku 4.5 | $1/$5 per M tokens | <1s | FAQ, status checks, simple lookups |
+| Moderate | Sonnet 4.6 | $3/$15 per M tokens | 2-5s | Drafting, summarization, structured analysis |
+| Complex | Opus 4.6 | $5/$25 per M tokens | 10-20s | Research, strategy, multi-step reasoning, code |
+
+**How it works:**
+1. Message arrives → regex pre-filter catches simple commands (no LLM needed, ~20% of messages)
+2. Haiku 4.5 classifies remaining messages as SIMPLE / MODERATE / COMPLEX (~$0.001 per classification)
+3. Routes to the appropriate model tier
+4. If the chosen model's confidence is low, automatically escalates to the next tier
+
+**Result:** ~$260/month for 30K messages (vs. $2,000+ with Opus for everything). Strong unit economics even at the $49 Junior tier.
+
 ### Agent Backend: Claude Agent SDK
 Built on the Claude Agent SDK, leveraging:
 - Native tool use for interacting with external systems
 - Structured outputs for reliable task execution
 - Long context for maintaining company knowledge
 - The skills ecosystem for dynamic capability acquisition
+- MCP (Model Context Protocol) for standardized tool connections
 
 ### Key Technical Components
-- **Onboarding Engine** -- structured flow to capture company context, data, and preferences
-- **Memory System** -- persistent, evolving knowledge base per AI employee
-- **Skill Registry** -- dynamic skill discovery, installation, and execution
-- **Orchestration Layer** -- multi-agent coordination and task routing
-- **WhatsApp Integration** -- WhatsApp Business API for message handling
-- **Autonomy Controller** -- per-task autonomy settings and approval workflows
+- **Web Platform** -- Next.js 15 + Supabase: signup, onboarding wizard, employee dashboard, task board, billing
+- **Model Router** -- Tiered routing: Haiku for simple, Sonnet for moderate, Opus for complex tasks
+- **Onboarding Engine** -- Web wizard + WhatsApp flow to capture company context, data, and preferences
+- **Memory System** -- Supabase PostgreSQL + pgvector: persistent, evolving knowledge base per AI employee
+- **Skill Registry** -- Dynamic skill discovery via skills.sh ecosystem + custom MCP tools
+- **Orchestration Layer** -- Multi-agent coordination and task routing
+- **WhatsApp Integration** -- Baileys (MVP) → WhatsApp Cloud API (production)
+- **Autonomy Controller** -- Per-task autonomy settings and approval workflows
 
 ## MVP Strategy: Dogfooding
 
-Build Journeyman for ourselves first. Use it to run Volund Ventures.
+Build Journeyman and use it to run itself. The Journeyman startup is Journeyman's first customer.
 
-### Phase 1: Build for Ourselves
-- Create 2-3 AI employees for our own startup operations
-- One handles customer/investor communications
-- One handles research and market analysis
-- One handles internal ops (scheduling, task management, note-taking)
-- All operate through WhatsApp
+### Phase 1: Build for Ourselves (Week 1)
+- Ship the full platform: web app (onboarding, dashboard) + WhatsApp agent backend
+- Create the first AI employee that runs the Journeyman startup operations
+- It handles: customer/beta user communications, market research, content drafting, task tracking
+- All operate through WhatsApp, managed via the web dashboard
 
 ### Phase 2: Learn and Iterate
 - What works? What breaks? Where does it need human intervention?
