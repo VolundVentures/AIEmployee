@@ -1,0 +1,21 @@
+{
+  "name": "journeyman",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "dev:web": "turbo dev --filter=@journeyman/web",
+    "dev:agent": "turbo dev --filter=@journeyman/agent",
+    "build:web": "turbo build --filter=@journeyman/web",
+    "build:agent": "turbo build --filter=@journeyman/agent"
+  },
+  "devDependencies": {
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "npm@10.9.4"
+}
