@@ -139,4 +139,29 @@ export const AGENT_TOOLS: Anthropic.Tool[] = [
       required: ["action"],
     },
   },
+  {
+    name: "find_skill",
+    description:
+      "Search for available skills that can extend your capabilities. Use this when you encounter a task type you don't have a specific tool for, or when the user asks about your capabilities.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "What kind of skill to search for",
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "list_skills",
+    description:
+      "List all currently installed skills and their descriptions.",
+    input_schema: {
+      type: "object" as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];

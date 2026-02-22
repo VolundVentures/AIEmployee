@@ -7,6 +7,9 @@ import { buildSystemPrompt, JOURNEYMAN_EMPLOYEE } from "./personas.js";
 import type { Persona } from "./personas.js";
 import { MemoryStore } from "../memory/store.js";
 import { TaskManager } from "../tasks/manager.js";
+import { SkillRegistry } from "../skills/registry.js";
+import { SkillLoader } from "../skills/loader.js";
+import { webSearch } from "./web-search.js";
 
 type Message = Anthropic.MessageParam;
 
@@ -30,6 +33,8 @@ export class AgentEngine {
   private persona: Persona;
   private memory: MemoryStore;
   private tasks: TaskManager;
+  private skillRegistry: SkillRegistry;
+  private skillLoader: SkillLoader;
 
   constructor(apiKey?: string, persona?: Persona) {
     this.anthropic = new Anthropic({ apiKey });
@@ -39,6 +44,8 @@ export class AgentEngine {
     const employeeId = "atlas-001";
     this.memory = new MemoryStore(employeeId);
     this.tasks = new TaskManager(employeeId);
+    this.skillRegistry = new SkillRegistry();
+    this.skillLoader = new SkillLoader(this.skillRegistry);
   }
 
   async processMessage(chatId: string, userMessage: string, forceModel?: ModelTier): Promise<EngineResult> {
@@ -76,7 +83,7 @@ export class AgentEngine {
         model: routing.model,
         max_tokens: modelConfig.maxTokens,
         system: systemPrompt,
-        tools: AGENT_TOOLS,
+        tools: [...AGENT_TOOLS, ...this.skillLoader.getToolDefinitions()],
         messages,
       });
 
@@ -154,9 +161,8 @@ export class AgentEngine {
     try {
       switch (name) {
         case "search_web": {
-          // Basic web search simulation - in production, integrate a real search API
           const query = input.query as string;
-          return `[Web search for "${query}" - In production, this connects to a search API. For now, please use your training knowledge to answer. Note: web search integration coming soon.]`;
+          return await webSearch(query);
         }
 
         case "save_memory": {
@@ -204,8 +210,28 @@ export class AgentEngine {
           return `[Approval requested] Action: ${action}${reason ? ` | Reason: ${reason}` : ""}. Waiting for user response.`;
         }
 
-        default:
+        case "find_skill": {
+          const query = input.query as string;
+          const results = this.skillRegistry.search(query);
+          if (results.length === 0) {
+            const all = this.skillRegistry.getAll();
+            return `No skills found matching "${query}". Available skills:\n${this.skillRegistry.formatList()}`;
+          }
+          return `Found ${results.length} skill(s):\n` +
+            results.map((s) => `- *${s.name}*: ${s.description} (use tool: ${s.handler})`).join("\n");
+        }
+
+        case "list_skills": {
+          return `Installed skills:\n${this.skillRegistry.formatList()}`;
+        }
+
+        default: {
+          // Check if it's a skill tool
+          if (this.skillLoader.isSkillTool(name)) {
+            return await this.skillLoader.execute(name, input);
+          }
           return `Unknown tool: ${name}`;
+        }
       }
     } catch (err) {
       console.error(`[AgentEngine] Tool error (${name}):`, err);
