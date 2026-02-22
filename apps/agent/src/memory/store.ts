@@ -1,77 +1,78 @@
+import { getServiceClient } from "@journeyman/db";
 import type { MemoryEntry, ConversationEntry } from "./types.js";
 
 /**
- * In-memory store that works without Supabase for local development.
- * Persists to a JSON file so data survives restarts.
- * Will be replaced with Supabase when database is connected.
+ * Persistent memory store backed by Supabase.
+ * Uses the service role client for direct database access from the agent backend.
  */
-
-import { readFileSync, writeFileSync, existsSync } from "fs";
-
-const DATA_FILE = "./journeyman_data.json";
-
-interface StoreData {
-  memory: MemoryEntry[];
-  conversations: ConversationEntry[];
-}
-
-function loadData(): StoreData {
-  if (existsSync(DATA_FILE)) {
-    try {
-      return JSON.parse(readFileSync(DATA_FILE, "utf-8"));
-    } catch {
-      return { memory: [], conversations: [] };
-    }
-  }
-  return { memory: [], conversations: [] };
-}
-
-function saveData(data: StoreData) {
-  writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
-}
-
-let data = loadData();
-
 export class MemoryStore {
   private employeeId: string;
+  private supabase: ReturnType<typeof getServiceClient>;
 
   constructor(employeeId: string) {
     this.employeeId = employeeId;
+    this.supabase = getServiceClient();
   }
 
   async saveMemory(content: string, type: MemoryEntry["type"], metadata: Record<string, unknown> = {}): Promise<MemoryEntry> {
-    const entry: MemoryEntry = {
-      id: crypto.randomUUID(),
-      employeeId: this.employeeId,
-      type,
-      content,
-      metadata,
-      createdAt: new Date(),
-    };
+    const { data, error } = await this.supabase
+      .from("memory")
+      .insert({
+        employee_id: this.employeeId,
+        type,
+        content,
+        metadata,
+      })
+      .select()
+      .single();
 
-    data.memory.push(entry);
-    saveData(data);
+    if (error) {
+      console.error("[Memory] Failed to save:", error.message);
+      throw error;
+    }
+
     console.log(`[Memory] Saved ${type}: ${content.slice(0, 80)}...`);
-    return entry;
+    return this.toMemoryEntry(data);
   }
 
   async searchMemory(query: string, limit = 10): Promise<MemoryEntry[]> {
-    const queryLower = query.toLowerCase();
-    const results = data.memory
-      .filter((m) => m.employeeId === this.employeeId)
-      .filter((m) => m.content.toLowerCase().includes(queryLower))
-      .slice(-limit);
+    const { data, error } = await this.supabase
+      .from("memory")
+      .select()
+      .eq("employee_id", this.employeeId)
+      .ilike("content", `%${query}%`)
+      .order("created_at", { ascending: false })
+      .limit(limit);
 
-    console.log(`[Memory] Search "${query}" found ${results.length} results`);
-    return results;
+    if (error) {
+      console.error("[Memory] Search failed:", error.message);
+      return [];
+    }
+
+    console.log(`[Memory] Search "${query}" found ${data.length} results`);
+    return data.map(this.toMemoryEntry);
   }
 
   async getRecentMemory(type?: MemoryEntry["type"], limit = 20): Promise<MemoryEntry[]> {
-    let results = data.memory.filter((m) => m.employeeId === this.employeeId);
+    let query = this.supabase
+      .from("memory")
+      .select()
+      .eq("employee_id", this.employeeId)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
     if (type) {
-      results = results.filter((m) => m.type === type);
+      query = query.eq("type", type);
     }
-    return results.slice(-limit);
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("[Memory] Failed to get recent:", error.message);
+      return [];
+    }
+
+    return data.map(this.toMemoryEntry);
   }
 
   async saveConversation(
@@ -82,26 +83,38 @@ export class MemoryStore {
     tokensUsed?: number,
     costUsd?: number
   ): Promise<void> {
-    const entry: ConversationEntry = {
-      id: crypto.randomUUID(),
-      employeeId: this.employeeId,
-      phoneNumber,
-      role,
-      content,
-      modelUsed,
-      tokensUsed,
-      costUsd,
-      createdAt: new Date(),
-    };
+    const { error } = await this.supabase
+      .from("conversations")
+      .insert({
+        employee_id: this.employeeId,
+        phone_number: phoneNumber,
+        role,
+        content,
+        model_used: modelUsed,
+        tokens_used: tokensUsed,
+        cost_usd: costUsd,
+      });
 
-    data.conversations.push(entry);
-    saveData(data);
+    if (error) {
+      console.error("[Memory] Failed to save conversation:", error.message);
+    }
   }
 
   async getConversationHistory(phoneNumber: string, limit = 20): Promise<ConversationEntry[]> {
-    return data.conversations
-      .filter((c) => c.employeeId === this.employeeId && c.phoneNumber === phoneNumber)
-      .slice(-limit);
+    const { data, error } = await this.supabase
+      .from("conversations")
+      .select()
+      .eq("employee_id", this.employeeId)
+      .eq("phone_number", phoneNumber)
+      .order("created_at", { ascending: true })
+      .limit(limit);
+
+    if (error) {
+      console.error("[Memory] Failed to get history:", error.message);
+      return [];
+    }
+
+    return data.map(this.toConversationEntry);
   }
 
   /** Get all memory as context string for the agent */
@@ -123,5 +136,32 @@ export class MemoryStore {
       }
     }
     return context;
+  }
+
+  /** Map Supabase row (snake_case) to MemoryEntry (camelCase) */
+  private toMemoryEntry(row: Record<string, unknown>): MemoryEntry {
+    return {
+      id: row.id as string,
+      employeeId: row.employee_id as string,
+      type: row.type as MemoryEntry["type"],
+      content: row.content as string,
+      metadata: (row.metadata as Record<string, unknown>) || {},
+      createdAt: new Date(row.created_at as string),
+    };
+  }
+
+  /** Map Supabase row (snake_case) to ConversationEntry (camelCase) */
+  private toConversationEntry(row: Record<string, unknown>): ConversationEntry {
+    return {
+      id: row.id as string,
+      employeeId: row.employee_id as string,
+      phoneNumber: row.phone_number as string,
+      role: row.role as "user" | "assistant",
+      content: row.content as string,
+      modelUsed: row.model_used as string | undefined,
+      tokensUsed: row.tokens_used as number | undefined,
+      costUsd: row.cost_usd as number | undefined,
+      createdAt: new Date(row.created_at as string),
+    };
   }
 }

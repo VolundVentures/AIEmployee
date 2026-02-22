@@ -10,6 +10,7 @@ import { TaskManager } from "../tasks/manager.js";
 import { SkillRegistry } from "../skills/registry.js";
 import { SkillLoader } from "../skills/loader.js";
 import { webSearch } from "./web-search.js";
+import { AutonomyController } from "../autonomy/controller.js";
 
 type Message = Anthropic.MessageParam;
 
@@ -35,17 +36,20 @@ export class AgentEngine {
   private tasks: TaskManager;
   private skillRegistry: SkillRegistry;
   private skillLoader: SkillLoader;
+  private autonomy: AutonomyController;
+  private defaultAutonomy: "supervised" | "semi_auto" | "auto" = "semi_auto";
 
-  constructor(apiKey?: string, persona?: Persona) {
+  constructor(apiKey?: string, persona?: Persona, employeeId?: string) {
     this.anthropic = new Anthropic({ apiKey });
     this.router = new ModelRouter(apiKey);
     this.persona = persona || JOURNEYMAN_EMPLOYEE;
 
-    const employeeId = "atlas-001";
-    this.memory = new MemoryStore(employeeId);
-    this.tasks = new TaskManager(employeeId);
+    const resolvedEmployeeId = employeeId || process.env.EMPLOYEE_ID || "atlas-001";
+    this.memory = new MemoryStore(resolvedEmployeeId);
+    this.tasks = new TaskManager(resolvedEmployeeId);
     this.skillRegistry = new SkillRegistry();
     this.skillLoader = new SkillLoader(this.skillRegistry);
+    this.autonomy = new AutonomyController();
   }
 
   async processMessage(chatId: string, userMessage: string, forceModel?: ModelTier): Promise<EngineResult> {
@@ -79,13 +83,20 @@ export class AgentEngine {
     const maxIterations = 10;
 
     for (let i = 0; i < maxIterations; i++) {
-      const response = await this.anthropic.messages.create({
-        model: routing.model,
-        max_tokens: modelConfig.maxTokens,
-        system: systemPrompt,
-        tools: [...AGENT_TOOLS, ...this.skillLoader.getToolDefinitions()],
-        messages,
-      });
+      let response: Anthropic.Message;
+      try {
+        response = await this.anthropic.messages.create({
+          model: routing.model,
+          max_tokens: modelConfig.maxTokens,
+          system: systemPrompt,
+          tools: [...AGENT_TOOLS, ...this.skillLoader.getToolDefinitions()],
+          messages,
+        });
+      } catch (err) {
+        console.error(`[AgentEngine] API call failed on iteration ${i + 1}:`, err);
+        finalText = "I'm having trouble connecting to my AI backend right now. Please try again in a moment.";
+        break;
+      }
 
       totalIn += response.usage.input_tokens;
       totalOut += response.usage.output_tokens;
@@ -111,11 +122,31 @@ export class AgentEngine {
       // Add assistant's response (with tool_use blocks) to messages
       messages.push({ role: "assistant", content: response.content });
 
-      // Execute each tool call and collect results
+      // Execute each tool call with autonomy checks
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
       for (const toolUse of toolUses) {
         console.log(`[AgentEngine] Tool call: ${toolUse.name}(${JSON.stringify(toolUse.input)})`);
-        const result = await this.executeTool(toolUse.name, toolUse.input as Record<string, unknown>);
+
+        // Check autonomy before executing
+        const beforeAction = this.autonomy.beforeAction(
+          this.defaultAutonomy,
+          toolUse.name,
+          `${toolUse.name}(${JSON.stringify(toolUse.input).slice(0, 100)})`
+        );
+
+        let result: string;
+        if (beforeAction.type === "request_approval") {
+          result = beforeAction.message;
+        } else {
+          result = await this.executeTool(toolUse.name, toolUse.input as Record<string, unknown>);
+
+          // Check if we should report the result
+          const afterAction = this.autonomy.afterAction(this.defaultAutonomy, toolUse.name, result);
+          if (afterAction.type === "report") {
+            console.log(`[AgentEngine] Autonomy report: ${afterAction.message.slice(0, 100)}`);
+          }
+        }
+
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
@@ -132,16 +163,23 @@ export class AgentEngine {
       }
     }
 
+    // Warn if the loop hit the max without a final response
+    if (!finalText) {
+      console.warn(`[AgentEngine] Hit max iterations (${maxIterations}) without final response`);
+      finalText = "I was working on your request but it required more steps than I could complete. Could you try breaking it into smaller parts?";
+    }
+
     // Update conversation history with final response
     history.push({ role: "assistant", content: finalText });
 
-    // Save conversation to memory store
-    await this.memory.saveConversation(chatId, "user", userMessage);
-    await this.memory.saveConversation(chatId, "assistant", finalText, routing.tier, totalIn + totalOut);
-
+    // Calculate cost before saving
     const cost =
       (totalIn / 1_000_000) * modelConfig.inputCostPer1M +
       (totalOut / 1_000_000) * modelConfig.outputCostPer1M;
+
+    // Save conversation to memory store
+    await this.memory.saveConversation(chatId, "user", userMessage);
+    await this.memory.saveConversation(chatId, "assistant", finalText, routing.tier, totalIn + totalOut, cost);
 
     console.log(
       `[AgentEngine] Model: ${routing.tier} | Tokens: ${totalIn}in/${totalOut}out | Cost: $${cost.toFixed(6)}`
@@ -214,7 +252,6 @@ export class AgentEngine {
           const query = input.query as string;
           const results = this.skillRegistry.search(query);
           if (results.length === 0) {
-            const all = this.skillRegistry.getAll();
             return `No skills found matching "${query}". Available skills:\n${this.skillRegistry.formatList()}`;
           }
           return `Found ${results.length} skill(s):\n` +

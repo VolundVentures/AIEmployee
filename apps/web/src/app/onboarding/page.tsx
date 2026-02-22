@@ -1,16 +1,74 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { ArrowRight, ArrowLeft, Building2, User, MessageSquare } from "lucide-react";
 
 type Step = 1 | 2 | 3;
 
 export default function OnboardingPage() {
+  const router = useRouter();
   const [step, setStep] = useState<Step>(1);
   const [companyName, setCompanyName] = useState("");
   const [industry, setIndustry] = useState("");
   const [employeeName, setEmployeeName] = useState("");
   const [employeeRole, setEmployeeRole] = useState("");
+  const [companyId, setCompanyId] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleStep1Next() {
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/companies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: companyName, industry }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Failed to create company");
+        return;
+      }
+      setCompanyId(data.id);
+      setStep(2);
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleStep2Next() {
+    if (!companyId) {
+      setError("Company not found. Please go back and try again.");
+      return;
+    }
+    setError("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/employees", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          company_id: companyId,
+          name: employeeName,
+          role: employeeRole,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "Failed to create employee");
+        return;
+      }
+      setStep(3);
+    } catch {
+      setError("Network error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <main className="min-h-screen flex items-center justify-center px-6">
@@ -26,6 +84,12 @@ export default function OnboardingPage() {
             />
           ))}
         </div>
+
+        {error && (
+          <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-4 py-3 text-sm text-red-400 mb-4">
+            {error}
+          </div>
+        )}
 
         {step === 1 && (
           <div>
@@ -72,11 +136,11 @@ export default function OnboardingPage() {
               </div>
 
               <button
-                onClick={() => setStep(2)}
-                disabled={!companyName}
+                onClick={handleStep1Next}
+                disabled={!companyName || loading}
                 className="w-full flex items-center justify-center gap-2 bg-[var(--accent)] hover:bg-[var(--accent-light)] disabled:opacity-40 disabled:cursor-not-allowed text-white py-3 rounded-lg font-medium transition-colors"
               >
-                Next <ArrowRight className="w-4 h-4" />
+                {loading ? "Creating..." : <>Next <ArrowRight className="w-4 h-4" /></>}
               </button>
             </div>
           </div>
@@ -133,11 +197,11 @@ export default function OnboardingPage() {
                   <ArrowLeft className="w-4 h-4" /> Back
                 </button>
                 <button
-                  onClick={() => setStep(3)}
-                  disabled={!employeeName || !employeeRole}
+                  onClick={handleStep2Next}
+                  disabled={!employeeName || !employeeRole || loading}
                   className="flex-1 flex items-center justify-center gap-2 bg-[var(--accent)] hover:bg-[var(--accent-light)] disabled:opacity-40 disabled:cursor-not-allowed text-white py-3 rounded-lg font-medium transition-colors"
                 >
-                  Next <ArrowRight className="w-4 h-4" />
+                  {loading ? "Creating..." : <>Next <ArrowRight className="w-4 h-4" /></>}
                 </button>
               </div>
             </div>
@@ -177,12 +241,12 @@ export default function OnboardingPage() {
               >
                 <ArrowLeft className="w-4 h-4" /> Back
               </button>
-              <a
-                href="/dashboard"
+              <button
+                onClick={() => router.push("/dashboard")}
                 className="flex-1 flex items-center justify-center gap-2 bg-[var(--accent)] hover:bg-[var(--accent-light)] text-white py-3 rounded-lg font-medium transition-colors"
               >
                 Go to Dashboard <ArrowRight className="w-4 h-4" />
-              </a>
+              </button>
             </div>
           </div>
         )}

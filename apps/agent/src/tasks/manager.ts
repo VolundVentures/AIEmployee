@@ -1,30 +1,17 @@
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { getServiceClient } from "@journeyman/db";
 import type { Task } from "./types.js";
 
-const TASKS_FILE = "./journeyman_tasks.json";
-
-function loadTasks(): Task[] {
-  if (existsSync(TASKS_FILE)) {
-    try {
-      return JSON.parse(readFileSync(TASKS_FILE, "utf-8"));
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function saveTasks(tasks: Task[]) {
-  writeFileSync(TASKS_FILE, JSON.stringify(tasks, null, 2));
-}
-
-let tasks = loadTasks();
-
+/**
+ * Task manager backed by Supabase.
+ * Uses the service role client for direct database access from the agent backend.
+ */
 export class TaskManager {
   private employeeId: string;
+  private supabase: ReturnType<typeof getServiceClient>;
 
   constructor(employeeId: string) {
     this.employeeId = employeeId;
+    this.supabase = getServiceClient();
   }
 
   async create(
@@ -32,20 +19,25 @@ export class TaskManager {
     description?: string,
     autonomy: Task["autonomy"] = "semi_auto"
   ): Promise<Task> {
-    const task: Task = {
-      id: crypto.randomUUID(),
-      employeeId: this.employeeId,
-      title,
-      description,
-      status: "pending",
-      autonomy,
-      createdAt: new Date(),
-    };
+    const { data, error } = await this.supabase
+      .from("tasks")
+      .insert({
+        employee_id: this.employeeId,
+        title,
+        description,
+        status: "pending",
+        autonomy,
+      })
+      .select()
+      .single();
 
-    tasks.push(task);
-    saveTasks(tasks);
+    if (error) {
+      console.error("[Tasks] Failed to create:", error.message);
+      throw error;
+    }
+
     console.log(`[Tasks] Created: "${title}" (${autonomy})`);
-    return task;
+    return this.toTask(data);
   }
 
   async update(
@@ -53,30 +45,60 @@ export class TaskManager {
     status: Task["status"],
     result?: string
   ): Promise<Task | null> {
-    const task = tasks.find((t) => t.id === taskId && t.employeeId === this.employeeId);
-    if (!task) return null;
-
-    task.status = status;
-    if (result) task.result = result;
+    const updates: Record<string, unknown> = { status };
+    if (result) updates.result = result;
     if (status === "completed" || status === "failed") {
-      task.completedAt = new Date();
+      updates.completed_at = new Date().toISOString();
     }
 
-    saveTasks(tasks);
-    console.log(`[Tasks] Updated "${task.title}" → ${status}`);
-    return task;
+    const { data, error } = await this.supabase
+      .from("tasks")
+      .update(updates)
+      .eq("id", taskId)
+      .eq("employee_id", this.employeeId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("[Tasks] Failed to update:", error.message);
+      return null;
+    }
+
+    console.log(`[Tasks] Updated "${data.title}" → ${status}`);
+    return this.toTask(data);
   }
 
   async list(status?: Task["status"]): Promise<Task[]> {
-    let results = tasks.filter((t) => t.employeeId === this.employeeId);
+    let query = this.supabase
+      .from("tasks")
+      .select()
+      .eq("employee_id", this.employeeId)
+      .order("created_at", { ascending: false });
+
     if (status) {
-      results = results.filter((t) => t.status === status);
+      query = query.eq("status", status);
     }
-    return results;
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.error("[Tasks] Failed to list:", error.message);
+      return [];
+    }
+
+    return data.map(this.toTask);
   }
 
   async get(taskId: string): Promise<Task | null> {
-    return tasks.find((t) => t.id === taskId && t.employeeId === this.employeeId) || null;
+    const { data, error } = await this.supabase
+      .from("tasks")
+      .select()
+      .eq("id", taskId)
+      .eq("employee_id", this.employeeId)
+      .single();
+
+    if (error) return null;
+    return this.toTask(data);
   }
 
   formatTaskList(taskList: Task[]): string {
@@ -95,5 +117,20 @@ export class TaskManager {
         return `${status} ${t.title} (${t.autonomy}, ${age}h ago)${t.result ? `\n    → ${t.result}` : ""}`;
       })
       .join("\n");
+  }
+
+  /** Map Supabase row (snake_case) to Task (camelCase) */
+  private toTask(row: Record<string, unknown>): Task {
+    return {
+      id: row.id as string,
+      employeeId: row.employee_id as string,
+      title: row.title as string,
+      description: row.description as string | undefined,
+      status: row.status as Task["status"],
+      autonomy: row.autonomy as Task["autonomy"],
+      result: row.result as string | undefined,
+      createdAt: new Date(row.created_at as string),
+      completedAt: row.completed_at ? new Date(row.completed_at as string) : undefined,
+    };
   }
 }

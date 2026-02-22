@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { Clock, CheckCircle2, AlertCircle, Circle, HelpCircle } from "lucide-react";
 
 const STATUS_CONFIG = {
@@ -16,45 +19,25 @@ interface TaskItem {
   description?: string;
   status: TaskStatus;
   autonomy: string;
-  createdAt: string;
+  created_at: string;
   result?: string;
+  employees?: { name: string };
 }
 
-// Demo tasks for the UI -- will be replaced with real data from Supabase
-const DEMO_TASKS: TaskItem[] = [
-  {
-    id: "1",
-    title: "Research WhatsApp AI agent competitors in UAE",
-    description: "Find and analyze top 10 competitors in the MENA AI agent space",
-    status: "completed",
-    autonomy: "auto",
-    createdAt: "2h ago",
-    result: "Found 8 competitors. Report saved to memory.",
-  },
-  {
-    id: "2",
-    title: "Draft launch announcement for LinkedIn",
-    status: "needs_approval",
-    autonomy: "supervised",
-    createdAt: "1h ago",
-  },
-  {
-    id: "3",
-    title: "Analyze pricing vs. OpenClaw and alternatives",
-    status: "in_progress",
-    autonomy: "semi_auto",
-    createdAt: "30m ago",
-  },
-  {
-    id: "4",
-    title: "Set up beta user onboarding sequence",
-    status: "pending",
-    autonomy: "semi_auto",
-    createdAt: "10m ago",
-  },
-];
-
 export default function TasksPage() {
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/tasks")
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) setTasks(data);
+      })
+      .catch(console.error)
+      .finally(() => setLoading(false));
+  }, []);
+
   const columns: { status: TaskStatus; label: string }[] = [
     { status: "pending", label: "Pending" },
     { status: "in_progress", label: "In Progress" },
@@ -74,6 +57,7 @@ export default function TasksPage() {
         <div className="flex items-center gap-4 text-sm text-[var(--muted)]">
           <a href="/dashboard" className="hover:text-white transition-colors">Dashboard</a>
           <a href="/tasks" className="text-white">Tasks</a>
+          <a href="/employees" className="hover:text-white transition-colors">Employees</a>
           <a href="/settings" className="hover:text-white transition-colors">Settings</a>
         </div>
       </nav>
@@ -82,37 +66,41 @@ export default function TasksPage() {
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-2xl font-bold">Task Board</h1>
           <div className="text-sm text-[var(--muted)]">
-            {DEMO_TASKS.length} tasks total
+            {tasks.length} tasks total
           </div>
         </div>
 
-        <div className="grid grid-cols-4 gap-4">
-          {columns.map((col) => {
-            const config = STATUS_CONFIG[col.status];
-            const tasks = DEMO_TASKS.filter((t) => t.status === col.status);
-            return (
-              <div key={col.status}>
-                <div className="flex items-center gap-2 mb-4">
-                  <config.icon className={`w-4 h-4 ${config.color}`} />
-                  <h2 className="font-medium text-sm">{col.label}</h2>
-                  <span className="text-xs text-[var(--muted)] bg-[var(--card)] rounded-full px-2 py-0.5">
-                    {tasks.length}
-                  </span>
+        {loading ? (
+          <div className="text-[var(--muted)] text-center py-12">Loading tasks...</div>
+        ) : (
+          <div className="grid grid-cols-4 gap-4">
+            {columns.map((col) => {
+              const config = STATUS_CONFIG[col.status];
+              const columnTasks = tasks.filter((t) => t.status === col.status);
+              return (
+                <div key={col.status}>
+                  <div className="flex items-center gap-2 mb-4">
+                    <config.icon className={`w-4 h-4 ${config.color}`} />
+                    <h2 className="font-medium text-sm">{col.label}</h2>
+                    <span className="text-xs text-[var(--muted)] bg-[var(--card)] rounded-full px-2 py-0.5">
+                      {columnTasks.length}
+                    </span>
+                  </div>
+                  <div className="space-y-3">
+                    {columnTasks.map((task) => (
+                      <TaskCard key={task.id} task={task} />
+                    ))}
+                    {columnTasks.length === 0 && (
+                      <div className="text-sm text-[var(--muted)] bg-[var(--card)] border border-dashed border-[var(--card-border)] rounded-lg p-4 text-center">
+                        No tasks
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="space-y-3">
-                  {tasks.map((task) => (
-                    <TaskCard key={task.id} task={task} />
-                  ))}
-                  {tasks.length === 0 && (
-                    <div className="text-sm text-[var(--muted)] bg-[var(--card)] border border-dashed border-[var(--card-border)] rounded-lg p-4 text-center">
-                      No tasks
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </main>
   );
@@ -125,6 +113,8 @@ function TaskCard({ task }: { task: TaskItem }) {
     auto: "Autonomous",
   }[task.autonomy] || task.autonomy;
 
+  const timeAgo = formatTimeAgo(task.created_at);
+
   return (
     <div className="bg-[var(--card)] border border-[var(--card-border)] rounded-lg p-4">
       <h3 className="font-medium text-sm mb-2">{task.title}</h3>
@@ -136,8 +126,25 @@ function TaskCard({ task }: { task: TaskItem }) {
       )}
       <div className="flex items-center justify-between text-xs text-[var(--muted)]">
         <span className="bg-[var(--background)] px-2 py-0.5 rounded">{autonomyLabel}</span>
-        <span>{task.createdAt}</span>
+        <span>{timeAgo}</span>
       </div>
+      {task.employees?.name && (
+        <div className="mt-2 text-xs text-[var(--muted)]">
+          Assigned to {task.employees.name}
+        </div>
+      )}
     </div>
   );
+}
+
+function formatTimeAgo(dateStr: string): string {
+  const now = Date.now();
+  const then = new Date(dateStr).getTime();
+  const diffMs = now - then;
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
 }
