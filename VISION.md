@@ -57,11 +57,12 @@ The dogfooding approach will help us discover the ideal customer: we'll use Jour
 
 You hire an AI employee and pay it a monthly salary. Pricing tiers based on capability:
 
-| Tier | Framing | Description |
-|------|---------|-------------|
-| Intern | Entry-level | Basic task execution, limited autonomy, needs frequent check-ins |
-| Associate | Mid-level | Solid execution, moderate autonomy, handles routine work independently |
-| Senior | Expert-level | Complex work, high autonomy, manages other AI employees, strategic input |
+| Tier | Monthly Salary | Description |
+|------|---------------|-------------|
+| Intern | Free | Limited tasks/month, basic skills, supervised mode only |
+| Junior | $49/mo | Core skills, moderate autonomy, single-role focus |
+| Senior | $149/mo | Advanced skills, full autonomy, multi-role capable |
+| Lead | $299/mo | Premium skills, team coordination, priority execution |
 
 This "salary" framing is powerful because:
 - It's intuitive -- people understand paying employees
@@ -98,13 +99,26 @@ Built on the Claude Agent SDK, leveraging:
 
 ## MVP Strategy: Dogfooding
 
-Build Journeyman for ourselves first. Use it to run Volund Ventures:
+Build Journeyman for ourselves first. Use it to run Volund Ventures.
 
-1. **Start with one AI employee** for ourselves -- onboard it with Volund Ventures context
-2. **Assign real work** -- customer communication, research, content drafting, scheduling, ops tasks
-3. **Iterate rapidly** -- fix what breaks, add what's missing, remove what's unused
-4. **Validate through usage** -- if it saves us meaningful time and money, others will pay for it too
-5. **Productize** -- package what works into a self-serve product
+### Phase 1: Build for Ourselves
+- Create 2-3 AI employees for our own startup operations
+- One handles customer/investor communications
+- One handles research and market analysis
+- One handles internal ops (scheduling, task management, note-taking)
+- All operate through WhatsApp
+
+### Phase 2: Learn and Iterate
+- What works? What breaks? Where does it need human intervention?
+- Which skills does it need to acquire most often?
+- How does the memory system perform over weeks/months?
+- What autonomy level feels right for different task types?
+
+### Phase 3: Productize
+- Package what works into a product others can use
+- Open up onboarding flow for external users
+- Launch in UAE market with WhatsApp-first experience
+- Build the skill marketplace
 
 ### First Milestone
 A single AI employee on WhatsApp that can:
@@ -114,6 +128,22 @@ A single AI employee on WhatsApp that can:
 - Acquire new skills when encountering unfamiliar task types
 - Ask clarifying questions when autonomy settings require it
 - Report task completion with results
+
+## Market Expansion Path
+
+### Starting Point: UAE / MENA
+- WhatsApp is the dominant business communication platform
+- High cost of hiring relative to startup budgets
+- Fast-growing startup ecosystem (Dubai, Abu Dhabi, Riyadh, Cairo)
+- English + Arabic bilingual market
+
+### Next: WhatsApp-Dominant Emerging Markets
+- Southeast Asia (Indonesia, India, Philippines)
+- Latin America (Brazil, Mexico, Colombia)
+
+### Eventually: Global, Multi-Platform
+- Add Slack, Teams, Telegram as additional interfaces
+- Web dashboard for management and analytics
 
 ## The Name: Journeyman
 
@@ -138,7 +168,18 @@ These are the questions we still need to answer:
 7. **Team building** -- What human skills do we need first? AI/ML engineer? WhatsApp API specialist? MENA business development?
 8. **Legal entity** -- UAE free zone company? Where to incorporate for this kind of product?
 
+## Success Criteria (6 Months)
+
+- [ ] 3+ AI employees running Volund Ventures operations daily via WhatsApp
+- [ ] At least one AI employee operating with high autonomy on routine tasks
+- [ ] Dynamic skill acquisition working reliably (AI employees self-equipping)
+- [ ] 5+ external beta users onboarding their own AI employees
+- [ ] Clear signal on which role/use-case has the strongest product-market fit
+- [ ] Revenue from at least 1 paying customer
+
 ---
+
+*"Every master was once a journeyman. Every journeyman was once an apprentice."*
 
 *This vision document is a living artifact. It will evolve as we learn from dogfooding, customer conversations, and market feedback.*
 
