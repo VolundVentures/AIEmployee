@@ -6,6 +6,8 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
+import qrcode from "qrcode-terminal";
+import { rmSync } from "fs";
 
 const logger = pino({ level: "silent" });
 
@@ -32,7 +34,6 @@ export class WhatsAppClient {
     this.socket = makeWASocket({
       auth: state,
       logger,
-      printQRInTerminal: true,
       browser: ["Journeyman", "Chrome", "1.0.0"],
     });
 
@@ -42,24 +43,36 @@ export class WhatsAppClient {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log("\n[Journeyman] Scan the QR code above with your WhatsApp app\n");
+        console.log("\n[WhatsApp] Scan this QR code with your WhatsApp app:\n");
+        qrcode.generate(qr, { small: true });
       }
 
       if (connection === "close") {
         const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
-        const shouldReconnect = reason !== DisconnectReason.loggedOut;
 
         console.log(
-          `[Journeyman] Connection closed. Reason: ${DisconnectReason[reason] || reason}. ${shouldReconnect ? "Reconnecting..." : "Logged out."}`
+          `[WhatsApp] Connection closed. Reason: ${DisconnectReason[reason] || reason}.`
         );
 
-        if (shouldReconnect) {
+        // 405 = stale session, 401 = unauthorized -- clear auth and reconnect
+        if (reason === 405 || reason === 401) {
+          console.log("[WhatsApp] Session expired. Clearing auth state and reconnecting...");
+          try { rmSync(this.authDir, { recursive: true, force: true }); } catch {}
           this.connect();
+          return;
+        }
+
+        const shouldReconnect = reason !== DisconnectReason.loggedOut;
+        if (shouldReconnect) {
+          console.log("[WhatsApp] Reconnecting...");
+          this.connect();
+        } else {
+          console.log("[WhatsApp] Logged out. Delete the auth folder and restart to re-scan QR.");
         }
       }
 
       if (connection === "open") {
-        console.log("[Journeyman] Connected to WhatsApp");
+        console.log("[WhatsApp] Connected successfully!");
       }
     });
 
@@ -78,13 +91,13 @@ export class WhatsAppClient {
         const jid = msg.key.remoteJid;
         if (!jid) continue;
 
-        console.log(`[Journeyman] Message from ${jid}: ${text}`);
+        console.log(`[WhatsApp] Message from ${jid}: ${text}`);
 
         if (this.messageHandler) {
           try {
             await this.messageHandler(jid, text, msg);
           } catch (err) {
-            console.error("[Journeyman] Error handling message:", err);
+            console.error("[WhatsApp] Error handling message:", err);
           }
         }
       }
