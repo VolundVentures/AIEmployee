@@ -1,5 +1,6 @@
 import makeWASocket, {
   useMultiFileAuthState,
+  makeCacheableSignalKeyStore,
   DisconnectReason,
   WASocket,
   proto,
@@ -42,6 +43,7 @@ export class WhatsAppClient extends EventEmitter {
   private maxRetries = 8;
   private stopped = false;
   private everConnected = false; // tracks if we EVER opened successfully with current auth
+  private authAlreadyCleared = false; // prevent infinite clear-reconnect-405 loop
 
   constructor(authDir = "./baileys_auth") {
     super();
@@ -104,12 +106,20 @@ export class WhatsAppClient extends EventEmitter {
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
     this.socket = makeWASocket({
-      auth: state,
+      auth: {
+        creds: state.creds,
+        // Official pattern: wrap keys with cacheable store for proper
+        // signal key management. Without this, sessions can silently corrupt.
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+      },
       logger,
       // Use a real browser fingerprint. Custom strings get 405'd.
       browser: Browsers.windows("Chrome"),
       connectTimeoutMs: 30_000,
       keepAliveIntervalMs: 25_000,
+      // Required by Baileys for message retry. We don't store messages
+      // so we return undefined, but the callback must exist.
+      getMessage: async () => undefined,
     });
 
     this.socket.ev.on("creds.update", saveCreds);
@@ -155,23 +165,24 @@ export class WhatsAppClient extends EventEmitter {
         }
 
         // ── 405 / 500: bad session / stale routingInfo ──
-        // If we've never connected with this auth, the creds are bad.
-        // Clear immediately instead of wasting retries on dead auth.
+        // If we've never connected with this auth, the creds are likely bad.
+        // Clear once to get a fresh QR. If 405 continues after clearing,
+        // the cause is likely IP-based — don't clear again (infinite loop).
         if (
           (statusCode === 405 || statusCode === 500) &&
-          !this.everConnected
+          !this.everConnected &&
+          !this.authAlreadyCleared &&
+          existsSync(this.authDir)
         ) {
-          if (existsSync(this.authDir)) {
-            console.log(
-              "[WhatsApp] Session rejected (stale auth). Clearing for fresh QR..."
-            );
-            this.clearAuth();
-            // Reset retry count — we're starting fresh
-            this.retryCount = 0;
-            await sleep(2000);
-            this.startSocket();
-            return;
-          }
+          console.log(
+            "[WhatsApp] Session rejected (stale auth). Clearing for fresh QR..."
+          );
+          this.clearAuth();
+          this.authAlreadyCleared = true;
+          this.retryCount = 0;
+          await sleep(2000);
+          this.startSocket();
+          return;
         }
 
         // ── Generic retry with exponential backoff ──
