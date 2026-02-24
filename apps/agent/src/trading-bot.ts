@@ -198,12 +198,10 @@ async function main() {
     }
   }
 
-  // Wait a few seconds after WhatsApp connects, then start scanning
-  setTimeout(() => {
-    console.log("[Goldie] Starting market scanner...");
-    scanMarket(); // Initial scan
-    setInterval(scanMarket, SCAN_INTERVAL);
-  }, 5000);
+  // Start scanning immediately — scanner checks isConnected() before sending
+  console.log("[Goldie] Starting market scanner...");
+  scanMarket();
+  setInterval(scanMarket, SCAN_INTERVAL);
 }
 
 /**
