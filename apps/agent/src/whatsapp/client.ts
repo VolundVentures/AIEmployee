@@ -6,7 +6,6 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
-import qrcode from "qrcode-terminal";
 import { rmSync } from "fs";
 
 const logger = pino({ level: "silent" });
@@ -43,8 +42,10 @@ export class WhatsAppClient {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        console.log("\n[WhatsApp] Scan this QR code with your WhatsApp app:\n");
-        qrcode.generate(qr, { small: true });
+        console.log("\n[WhatsApp] Scan this QR code with your WhatsApp app:");
+        console.log("[WhatsApp] Open WhatsApp > Settings > Linked Devices > Link a Device\n");
+        console.log(qr);
+        console.log();
       }
 
       if (connection === "close") {
