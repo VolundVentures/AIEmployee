@@ -38,6 +38,7 @@ export class AgentEngine {
   private skillRegistry: SkillRegistry;
   private skillLoader: SkillLoader;
   private autonomy: AutonomyController;
+  private memoryEnabled: boolean;
   private defaultAutonomy: "supervised" | "semi_auto" | "auto" = "semi_auto";
 
   constructor(apiKey?: string, persona?: Persona, employeeId?: string) {
@@ -45,8 +46,12 @@ export class AgentEngine {
     this.router = new ModelRouter(apiKey);
     this.persona = persona || JOURNEYMAN_EMPLOYEE;
 
-    const resolvedEmployeeId = employeeId || process.env.EMPLOYEE_ID || "atlas-001";
+    const resolvedEmployeeId = employeeId || process.env.EMPLOYEE_ID || "";
+    this.memoryEnabled = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedEmployeeId);
     this.memory = new MemoryStore(resolvedEmployeeId);
+    if (!this.memoryEnabled) {
+      console.warn("[AgentEngine] No valid EMPLOYEE_ID (UUID) set — memory/conversation persistence disabled.");
+    }
     this.tasks = new TaskManager(resolvedEmployeeId);
     this.skillRegistry = new SkillRegistry();
     this.skillLoader = new SkillLoader(this.skillRegistry);
@@ -68,7 +73,7 @@ export class AgentEngine {
     console.log(`[AgentEngine] Routing: ${routing.reason}`);
 
     // Build system prompt with memory context
-    const memoryContext = await this.memory.getContextString();
+    const memoryContext = this.memoryEnabled ? await this.memory.getContextString() : "";
     const systemPrompt = buildSystemPrompt(this.persona, memoryContext || undefined);
 
     // Keep last 20 messages for context
@@ -178,9 +183,15 @@ export class AgentEngine {
       (totalIn / 1_000_000) * modelConfig.inputCostPer1M +
       (totalOut / 1_000_000) * modelConfig.outputCostPer1M;
 
-    // Save conversation to memory store
-    await this.memory.saveConversation(chatId, "user", userMessage);
-    await this.memory.saveConversation(chatId, "assistant", finalText, routing.tier, totalIn + totalOut, cost);
+    // Save conversation to memory store (skip if no valid employee ID)
+    if (this.memoryEnabled) {
+      try {
+        await this.memory.saveConversation(chatId, "user", userMessage);
+        await this.memory.saveConversation(chatId, "assistant", finalText, routing.tier, totalIn + totalOut, cost);
+      } catch (err) {
+        console.warn("[AgentEngine] Failed to save conversation (non-fatal):", err instanceof Error ? err.message : err);
+      }
+    }
 
     console.log(
       `[AgentEngine] Model: ${routing.tier} | Tokens: ${totalIn}in/${totalOut}out | Cost: $${cost.toFixed(6)}`
@@ -205,6 +216,7 @@ export class AgentEngine {
         }
 
         case "save_memory": {
+          if (!this.memoryEnabled) return "Memory persistence is disabled (no EMPLOYEE_ID configured).";
           const content = input.content as string;
           const type = input.type as "fact" | "preference" | "task_outcome" | "learned_skill";
           await this.memory.saveMemory(content, type);
@@ -212,6 +224,7 @@ export class AgentEngine {
         }
 
         case "recall_memory": {
+          if (!this.memoryEnabled) return "Memory persistence is disabled (no EMPLOYEE_ID configured).";
           const query = input.query as string;
           const results = await this.memory.searchMemory(query);
           if (results.length === 0) {
