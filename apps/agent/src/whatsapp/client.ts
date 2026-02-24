@@ -93,12 +93,17 @@ export class WhatsAppClient extends EventEmitter {
       return;
     }
 
+    const from = `whatsapp:${this.twilioNumber}`;
+    const to = this.jidToTwilio(jid);
+    console.log(`[WhatsApp] Sending: from=${from} to=${to} body="${text.slice(0, 80)}..."`);
+
     try {
-      await this.twilioClient.messages.create({
+      const result = await this.twilioClient.messages.create({
         body: text,
-        from: `whatsapp:${this.twilioNumber}`,
-        to: this.jidToTwilio(jid),
+        from,
+        to,
       });
+      console.log(`[WhatsApp] Sent OK (SID: ${result.sid})`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[WhatsApp] Failed to send message: ${msg}`);
@@ -144,10 +149,18 @@ export class WhatsAppClient extends EventEmitter {
       const from = body.get("From") || "";   // "whatsapp:+971589115381"
       const text = body.get("Body") || "";
 
+      console.log(`[WhatsApp] Webhook received -- From: ${from}, Body: "${text}"`);
+
       // Convert Twilio format → JID
       const jid = this.twilioToJid(from);
 
-      if (jid && text && this.messageHandler) {
+      if (!jid) {
+        console.warn("[WhatsApp] Could not parse sender JID from:", from);
+      } else if (!text) {
+        console.warn("[WhatsApp] Empty message body, ignoring.");
+      } else if (!this.messageHandler) {
+        console.warn("[WhatsApp] No message handler registered!");
+      } else {
         console.log(`[WhatsApp] Message from ${jid}: ${text}`);
         try {
           await this.messageHandler(jid, text);

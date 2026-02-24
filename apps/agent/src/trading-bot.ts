@@ -198,6 +198,12 @@ async function main() {
     }
   }
 
+  // Send a test message to verify Twilio API works
+  if (ALERT_PHONE && whatsapp.isConnected()) {
+    console.log("[Goldie] Sending startup test message...");
+    await whatsapp.sendMessage(ALERT_PHONE, "🥇 Goldie is online! Trading bot connected successfully.");
+  }
+
   // Start scanning immediately — scanner checks isConnected() before sending
   console.log("[Goldie] Starting market scanner...");
   scanMarket();
