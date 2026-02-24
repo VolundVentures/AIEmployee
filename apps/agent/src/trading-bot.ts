@@ -13,7 +13,7 @@
  * Environment variables:
  *   ANTHROPIC_API_KEY   -- Claude API key (for AI-enhanced commentary)
  *   TWELVE_DATA_API_KEY -- (optional) Twelve Data API key for better data
- *   ALERT_PHONE         -- Your WhatsApp JID to receive signals (e.g. 971501234567@s.whatsapp.net)
+ *   ALERT_PHONE         -- Your phone number to receive signals (e.g. 971501234567@s.whatsapp.net)
  *   SCAN_INTERVAL_MINS  -- How often to scan (default: 5)
  *   MIN_CONFIDENCE       -- Minimum confidence % to send alert (default: 40)
  */

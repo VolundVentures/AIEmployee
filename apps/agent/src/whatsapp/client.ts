@@ -1,264 +1,194 @@
-import makeWASocket, {
-  useMultiFileAuthState,
-  makeCacheableSignalKeyStore,
-  DisconnectReason,
-  WASocket,
-  proto,
-  Browsers,
-} from "@whiskeysockets/baileys";
-import { Boom } from "@hapi/boom";
-import pino from "pino";
-import qrcode from "qrcode-terminal";
-import { rmSync, existsSync } from "fs";
+/**
+ * WhatsApp client powered by the Twilio API.
+ *
+ * Replaces the previous Baileys (WhatsApp Web reverse-engineering) approach
+ * which was blocked by WhatsApp's 405 IP-level rejections.
+ *
+ * Twilio is an official WhatsApp Business Solution Provider — no IP blocking,
+ * no QR code scanning, and much more reliable.
+ *
+ * Required environment variables:
+ *   TWILIO_ACCOUNT_SID    -- Twilio account SID
+ *   TWILIO_AUTH_TOKEN      -- Twilio auth token
+ *   TWILIO_WHATSAPP_NUMBER -- Twilio WhatsApp sender (e.g. +14155238886 for sandbox)
+ *   WEBHOOK_PORT           -- Port for incoming-message webhook (default: 3001)
+ */
+
+import twilio from "twilio";
+import { createServer, type IncomingMessage, type ServerResponse } from "http";
 import { EventEmitter } from "events";
 
-const logger = pino({ level: "silent" });
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 export interface MessageHandler {
-  (jid: string, text: string, message: proto.IWebMessageInfo): Promise<void>;
+  (jid: string, text: string): Promise<void>;
 }
 
-/**
- * Robust WhatsApp client built on Baileys.
- *
- * Key design decisions:
- *   - Uses Browsers.windows('Chrome') so WhatsApp sees a real platform
- *     (custom strings like "Journeyman" cause 405 rejections).
- *   - Renders QR codes visually in the terminal via qrcode-terminal.
- *   - Tracks actual connection state; sendMessage gracefully skips when
- *     disconnected instead of crashing.
- *   - On persistent 405 (bad routingInfo / stale creds), clears auth
- *     automatically so a fresh QR appears.
- *   - Each reconnect tears down old socket + listeners first (no leak).
- *   - Emits "ready" event so callers can await actual connection.
- */
 export class WhatsAppClient extends EventEmitter {
-  private socket: WASocket | null = null;
+  private twilioClient: twilio.Twilio | null = null;
   private messageHandler: MessageHandler | null = null;
-  private authDir: string;
+  private twilioNumber: string;
   private connected = false;
-  private retryCount = 0;
-  private maxRetries = 8;
-  private stopped = false;
-  private everConnected = false; // tracks if we EVER opened successfully with current auth
-  private authAlreadyCleared = false; // prevent infinite clear-reconnect-405 loop
+  private webhookPort: number;
 
-  constructor(authDir = "./baileys_auth") {
+  constructor(_authDir?: string) {
     super();
-    this.authDir = authDir;
+    // _authDir is ignored — Twilio handles auth via API keys, not local files.
+    // Parameter kept for backward compatibility with existing instantiation.
+    this.twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || "";
+    this.webhookPort = parseInt(process.env.WEBHOOK_PORT || "3001", 10);
   }
 
   onMessage(handler: MessageHandler) {
     this.messageHandler = handler;
   }
 
-  /** Whether the connection is open and ready to send. */
+  /** Whether the Twilio client is configured and ready to send. */
   isConnected(): boolean {
-    return this.connected && this.socket !== null;
+    return this.connected;
   }
 
   /**
-   * Connect to WhatsApp.
-   * Resolves when the connection is open, or after the first QR is shown
-   * (so the caller isn't blocked forever waiting for a scan).
+   * Initialize the Twilio client and start the webhook server.
+   * Resolves once the webhook server is listening and we're ready to
+   * send/receive messages.
    */
   async connect(): Promise<void> {
-    this.stopped = false;
-    this.retryCount = 0;
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
 
-    return new Promise<void>((resolve) => {
-      let resolved = false;
-      const done = () => {
-        if (!resolved) {
-          resolved = true;
-          resolve();
-        }
-      };
+    if (!accountSid || !authToken || !this.twilioNumber) {
+      console.error("[WhatsApp] Missing Twilio config. Required env vars:");
+      console.error("  TWILIO_ACCOUNT_SID");
+      console.error("  TWILIO_AUTH_TOKEN");
+      console.error("  TWILIO_WHATSAPP_NUMBER");
+      console.error("[WhatsApp] Running in console-only mode (no WhatsApp).");
+      return;
+    }
 
-      // Resolve on first "open" or first "qr" (so main() doesn't hang)
-      this.once("ready", done);
-      this.once("qr", done);
+    this.twilioClient = twilio(accountSid, authToken);
 
-      this.startSocket();
-    });
+    // Start webhook server for incoming messages
+    await this.startWebhookServer();
+
+    this.connected = true;
+    console.log("[WhatsApp] Connected via Twilio!");
+    console.log(`[WhatsApp] Webhook listening on port ${this.webhookPort}`);
+    console.log(`[WhatsApp] Sender: whatsapp:${this.twilioNumber}`);
+    console.log(
+      `[WhatsApp] Set your Twilio webhook URL to: http://<your-host>:${this.webhookPort}/webhook/whatsapp`
+    );
+    this.emit("ready");
   }
 
   /**
-   * Create a fresh socket, tearing down any previous one.
-   * This is the core reconnection loop — never call connect() recursively.
+   * Send a WhatsApp message via Twilio.
+   * @param jid  Phone number in JID format (e.g. "971589115381@s.whatsapp.net")
+   *             or plain number (e.g. "971589115381")
+   * @param text Message body
    */
-  private async startSocket(): Promise<void> {
-    if (this.stopped) return;
-
-    // Clean up previous socket
-    if (this.socket) {
-      this.socket.ev.removeAllListeners("connection.update");
-      this.socket.ev.removeAllListeners("creds.update");
-      this.socket.ev.removeAllListeners("messages.upsert");
-      try { this.socket.end(undefined); } catch {}
-      this.socket = null;
-    }
-
-    this.connected = false;
-
-    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-
-    this.socket = makeWASocket({
-      auth: {
-        creds: state.creds,
-        // Official pattern: wrap keys with cacheable store for proper
-        // signal key management. Without this, sessions can silently corrupt.
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
-      },
-      logger,
-      // Use a real browser fingerprint. Custom strings get 405'd.
-      browser: Browsers.windows("Chrome"),
-      connectTimeoutMs: 30_000,
-      keepAliveIntervalMs: 25_000,
-      // Required by Baileys for message retry. We don't store messages
-      // so we return undefined, but the callback must exist.
-      getMessage: async () => undefined,
-    });
-
-    this.socket.ev.on("creds.update", saveCreds);
-
-    this.socket.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      // ── QR code ──────────────────────────────────────────
-      if (qr) {
-        console.log("\n[WhatsApp] Scan this QR code with WhatsApp:");
-        console.log("[WhatsApp] Open WhatsApp > Settings > Linked Devices > Link a Device\n");
-        qrcode.generate(qr, { small: true });
-        this.emit("qr", qr);
-      }
-
-      // ── Connected ────────────────────────────────────────
-      if (connection === "open") {
-        this.connected = true;
-        this.retryCount = 0;
-        this.everConnected = true;
-        console.log("[WhatsApp] Connected successfully!");
-        this.emit("ready");
-      }
-
-      // ── Disconnected ─────────────────────────────────────
-      if (connection === "close") {
-        this.connected = false;
-        const statusCode =
-          (lastDisconnect?.error as Boom)?.output?.statusCode ?? 0;
-        const reasonName = DisconnectReason[statusCode] || String(statusCode);
-
-        console.log(
-          `[WhatsApp] Disconnected: ${reasonName} (${statusCode})`
-        );
-
-        // ── loggedOut (401): user explicitly unpaired ──
-        if (statusCode === DisconnectReason.loggedOut) {
-          console.log("[WhatsApp] Logged out by user. Clearing session...");
-          this.clearAuth();
-          console.log("[WhatsApp] Restart the bot to scan a new QR code.");
-          this.stopped = true;
-          return;
-        }
-
-        // ── 405 / 500: bad session / stale routingInfo ──
-        // If we've never connected with this auth, the creds are likely bad.
-        // Clear once to get a fresh QR. If 405 continues after clearing,
-        // the cause is likely IP-based — don't clear again (infinite loop).
-        if (
-          (statusCode === 405 || statusCode === 500) &&
-          !this.everConnected &&
-          !this.authAlreadyCleared &&
-          existsSync(this.authDir)
-        ) {
-          console.log(
-            "[WhatsApp] Session rejected (stale auth). Clearing for fresh QR..."
-          );
-          this.clearAuth();
-          this.authAlreadyCleared = true;
-          this.retryCount = 0;
-          await sleep(2000);
-          this.startSocket();
-          return;
-        }
-
-        // ── Generic retry with exponential backoff ──
-        this.retryCount++;
-
-        if (this.retryCount > this.maxRetries) {
-          console.log(
-            `[WhatsApp] Failed after ${this.maxRetries} attempts. Stopping.`
-          );
-          console.log("[WhatsApp] Restart the bot to try again.");
-          this.stopped = true;
-          return;
-        }
-
-        // 2s → 4s → 8s → 16s → 30s → 30s → ...
-        const delay = Math.min(
-          2000 * Math.pow(2, this.retryCount - 1),
-          30_000
-        );
-        console.log(
-          `[WhatsApp] Reconnecting ${this.retryCount}/${this.maxRetries} in ${(delay / 1000).toFixed(0)}s...`
-        );
-        await sleep(delay);
-        this.startSocket();
-      }
-    });
-
-    this.socket.ev.on("messages.upsert", async ({ messages, type }) => {
-      if (type !== "notify") return;
-
-      for (const msg of messages) {
-        if (msg.key.fromMe) continue;
-
-        const text =
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text;
-
-        if (!text) continue;
-
-        const jid = msg.key.remoteJid;
-        if (!jid) continue;
-
-        console.log(`[WhatsApp] Message from ${jid}: ${text}`);
-
-        if (this.messageHandler) {
-          try {
-            await this.messageHandler(jid, text, msg);
-          } catch (err) {
-            console.error("[WhatsApp] Error handling message:", err);
-          }
-        }
-      }
-    });
-  }
-
-  private clearAuth(): void {
-    try {
-      if (existsSync(this.authDir)) {
-        rmSync(this.authDir, { recursive: true, force: true });
-        console.log(`[WhatsApp] Auth cleared: ${this.authDir}`);
-      }
-    } catch (err) {
-      console.error("[WhatsApp] Failed to clear auth:", err);
-    }
-    this.everConnected = false;
-  }
-
   async sendMessage(jid: string, text: string): Promise<void> {
-    if (!this.isConnected()) {
+    if (!this.connected || !this.twilioClient) {
       console.warn("[WhatsApp] Cannot send — not connected. Skipping.");
       return;
     }
-    await this.socket!.sendMessage(jid, { text });
+
+    try {
+      await this.twilioClient.messages.create({
+        body: text,
+        from: `whatsapp:${this.twilioNumber}`,
+        to: this.jidToTwilio(jid),
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[WhatsApp] Failed to send message: ${msg}`);
+    }
   }
 
-  getSocket(): WASocket | null {
-    return this.socket;
+  getSocket(): null {
+    return null;
+  }
+
+  // ─── Private helpers ─────────────────────────────────────
+
+  private startWebhookServer(): Promise<void> {
+    return new Promise((resolve) => {
+      const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+        // Health check
+        if (req.method === "GET" && req.url === "/") {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("WhatsApp webhook is running");
+          return;
+        }
+
+        // Twilio sends incoming messages as POST to this path
+        if (req.method === "POST" && req.url === "/webhook/whatsapp") {
+          await this.handleIncomingMessage(req, res);
+          return;
+        }
+
+        res.writeHead(404);
+        res.end();
+      });
+
+      server.listen(this.webhookPort, () => resolve());
+    });
+  }
+
+  private async handleIncomingMessage(
+    req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<void> {
+    try {
+      const body = await this.parseFormBody(req);
+      const from = body.get("From") || "";   // "whatsapp:+971589115381"
+      const text = body.get("Body") || "";
+
+      // Convert Twilio format → JID
+      const jid = this.twilioToJid(from);
+
+      if (jid && text && this.messageHandler) {
+        console.log(`[WhatsApp] Message from ${jid}: ${text}`);
+        try {
+          await this.messageHandler(jid, text);
+        } catch (err) {
+          console.error("[WhatsApp] Error handling message:", err);
+        }
+      }
+    } catch (err) {
+      console.error("[WhatsApp] Webhook parse error:", err);
+    }
+
+    // Respond with empty TwiML (Twilio expects this; no auto-reply)
+    res.writeHead(200, { "Content-Type": "text/xml" });
+    res.end("<Response></Response>");
+  }
+
+  private parseFormBody(req: IncomingMessage): Promise<URLSearchParams> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("error", reject);
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks).toString();
+        resolve(new URLSearchParams(raw));
+      });
+    });
+  }
+
+  /**
+   * Convert Twilio's "whatsapp:+971589115381" → "971589115381@s.whatsapp.net"
+   */
+  private twilioToJid(twilioFrom: string): string {
+    const phone = twilioFrom.replace("whatsapp:", "").replace("+", "");
+    return phone ? `${phone}@s.whatsapp.net` : "";
+  }
+
+  /**
+   * Convert JID or plain phone to Twilio format.
+   *   "971589115381@s.whatsapp.net" → "whatsapp:+971589115381"
+   *   "971589115381"                → "whatsapp:+971589115381"
+   */
+  private jidToTwilio(jid: string): string {
+    const phone = jid.replace("@s.whatsapp.net", "");
+    return `whatsapp:+${phone}`;
   }
 }

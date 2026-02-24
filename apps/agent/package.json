@@ -14,9 +14,9 @@
     "@anthropic-ai/sdk": "^0.39.0",
     "@journeyman/db": "*",
     "@journeyman/shared": "*",
-    "@whiskeysockets/baileys": "^6.7.16",
     "dotenv": "^16.4.0",
-    "pino": "^9.6.0"
+    "pino": "^9.6.0",
+    "twilio": "^5.12.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
