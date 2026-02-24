@@ -10,7 +10,7 @@ export const MODELS = {
     description: "Fast, simple tasks",
   },
   sonnet: {
-    id: "claude-sonnet-4-6-20250514",
+    id: "claude-sonnet-4-5-20250514",
     tier: "sonnet" as const,
     inputCostPer1M: 3.0,
     outputCostPer1M: 15.0,
@@ -18,10 +18,10 @@ export const MODELS = {
     description: "Balanced, moderate tasks",
   },
   opus: {
-    id: "claude-opus-4-6-20250514",
+    id: "claude-sonnet-4-5-20250514",
     tier: "opus" as const,
-    inputCostPer1M: 5.0,
-    outputCostPer1M: 25.0,
+    inputCostPer1M: 3.0,
+    outputCostPer1M: 15.0,
     maxTokens: 16384,
     description: "Complex reasoning and research",
   },
