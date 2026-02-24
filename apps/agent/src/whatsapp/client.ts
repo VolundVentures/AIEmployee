@@ -20,8 +20,10 @@ export class WhatsAppClient {
   private socket: WASocket | null = null;
   private messageHandler: MessageHandler | null = null;
   private authDir: string;
+  private connected = false;
   private retryCount = 0;
-  private maxRetries = 5;
+  private maxRetries = 6;
+  private connecting = false;
 
   constructor(authDir = "./baileys_auth") {
     this.authDir = authDir;
@@ -31,7 +33,42 @@ export class WhatsAppClient {
     this.messageHandler = handler;
   }
 
+  /** Whether the WhatsApp connection is open and ready to send messages. */
+  isConnected(): boolean {
+    return this.connected && this.socket !== null;
+  }
+
+  /**
+   * Connect to WhatsApp. This is the only public entry point.
+   * Internally handles reconnection without stacking event listeners.
+   */
   async connect(): Promise<void> {
+    if (this.connecting) return;
+    this.connecting = true;
+
+    try {
+      await this.createSocket();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  /**
+   * Creates a new socket, tearing down any previous one.
+   * All event listeners are attached fresh each time.
+   */
+  private async createSocket(): Promise<void> {
+    // Tear down previous socket to prevent listener leaks
+    if (this.socket) {
+      this.socket.ev.removeAllListeners("connection.update");
+      this.socket.ev.removeAllListeners("creds.update");
+      this.socket.ev.removeAllListeners("messages.upsert");
+      this.socket.end(undefined);
+      this.socket = null;
+    }
+
+    this.connected = false;
+
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
     this.socket = makeWASocket({
@@ -52,46 +89,60 @@ export class WhatsAppClient {
         console.log();
       }
 
+      if (connection === "open") {
+        this.connected = true;
+        this.retryCount = 0;
+        console.log("[WhatsApp] Connected successfully!");
+      }
+
       if (connection === "close") {
-        const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
-        const reasonName = DisconnectReason[reason] || String(reason);
+        this.connected = false;
+        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const reasonName = DisconnectReason[statusCode] || String(statusCode);
 
-        console.log(`[WhatsApp] Connection closed. Reason: ${reasonName} (${reason}).`);
+        console.log(`[WhatsApp] Connection closed. Reason: ${reasonName} (${statusCode}).`);
 
-        // loggedOut = user explicitly unpaired. Clear auth and stop.
-        if (reason === DisconnectReason.loggedOut) {
+        // ── loggedOut (401): user explicitly unpaired. Clear auth and stop. ──
+        if (statusCode === DisconnectReason.loggedOut) {
           console.log("[WhatsApp] Logged out by user. Clearing session...");
-          try { rmSync(this.authDir, { recursive: true, force: true }); } catch {}
+          this.clearAuth();
           console.log("[WhatsApp] Restart the bot to get a fresh QR code.");
           return;
         }
 
-        // Everything else (405, 408, 428, 440, 500, 515, etc.) = transient.
-        // Reconnect with exponential backoff.
+        // ── All other errors: reconnect with backoff. ──
+        // 405 = server rejected connection (usually stale session)
+        // 408 = timed out
+        // 428 = connection replaced (opened on another device)
+        // 440 = multidevice mismatch
+        // 500 = bad session
+        // 515 = restart required
         this.retryCount++;
 
+        // After 3 consecutive failures with 405/500, the session is likely
+        // corrupted. Clear auth so we get a fresh QR on the next attempt.
+        if (
+          this.retryCount === 3 &&
+          (statusCode === 405 || statusCode === 500)
+        ) {
+          console.log("[WhatsApp] Persistent 405/500 -- session appears corrupted.");
+          console.log("[WhatsApp] Clearing auth to force fresh QR code...");
+          this.clearAuth();
+          // Don't return -- fall through to retry, which will show a QR code
+        }
+
         if (this.retryCount > this.maxRetries) {
-          console.log(`[WhatsApp] Failed after ${this.maxRetries} retries. Giving up.`);
-          console.log("[WhatsApp] Try these steps:");
-          console.log("  1. Stop the bot");
-          if (existsSync(this.authDir)) {
-            console.log(`  2. Delete the auth folder: rm -rf ${this.authDir}`);
-            console.log("  3. Restart the bot and scan the new QR code");
-          } else {
-            console.log("  2. Restart the bot and scan the QR code");
-          }
+          console.log(`[WhatsApp] Failed after ${this.maxRetries} attempts. Stopping.`);
+          console.log("[WhatsApp] Restart the bot to try again.");
           return;
         }
 
         const delay = Math.min(2000 * Math.pow(2, this.retryCount - 1), 60000);
         console.log(`[WhatsApp] Retry ${this.retryCount}/${this.maxRetries} in ${delay / 1000}s...`);
         await sleep(delay);
-        this.connect();
-      }
 
-      if (connection === "open") {
-        this.retryCount = 0; // Reset on successful connection
-        console.log("[WhatsApp] Connected successfully!");
+        // Create a fresh socket (tears down old listeners first)
+        await this.createSocket();
       }
     });
 
@@ -123,11 +174,23 @@ export class WhatsAppClient {
     });
   }
 
-  async sendMessage(jid: string, text: string): Promise<void> {
-    if (!this.socket) {
-      throw new Error("WhatsApp client not connected");
+  private clearAuth(): void {
+    try {
+      if (existsSync(this.authDir)) {
+        rmSync(this.authDir, { recursive: true, force: true });
+        console.log(`[WhatsApp] Auth folder deleted: ${this.authDir}`);
+      }
+    } catch (err) {
+      console.error("[WhatsApp] Failed to clear auth:", err);
     }
-    await this.socket.sendMessage(jid, { text });
+  }
+
+  async sendMessage(jid: string, text: string): Promise<void> {
+    if (!this.isConnected()) {
+      console.warn("[WhatsApp] Cannot send message -- not connected. Skipping.");
+      return;
+    }
+    await this.socket!.sendMessage(jid, { text });
   }
 
   getSocket(): WASocket | null {

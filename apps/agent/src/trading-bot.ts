@@ -179,9 +179,15 @@ async function main() {
         const message = signalEngine.formatSignalMessage(signal15);
         console.log(`[Goldie] ALERT triggered:\n${message}`);
 
-        if (ALERT_PHONE && whatsapp.getSocket()) {
-          await whatsapp.sendMessage(ALERT_PHONE, message);
-          console.log(`[Goldie] Alert sent to ${ALERT_PHONE}`);
+        if (ALERT_PHONE && whatsapp.isConnected()) {
+          try {
+            await whatsapp.sendMessage(ALERT_PHONE, message);
+            console.log(`[Goldie] Alert sent to ${ALERT_PHONE}`);
+          } catch (err) {
+            console.error("[Goldie] Failed to send WhatsApp alert:", err);
+          }
+        } else if (ALERT_PHONE) {
+          console.warn("[Goldie] WhatsApp not connected -- alert printed to console only.");
         }
 
         lastSignalDirection = signal15.direction;
