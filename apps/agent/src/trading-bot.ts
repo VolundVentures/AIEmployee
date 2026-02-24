@@ -92,7 +92,7 @@ async function main() {
       console.log(`[Goldie] Message from ${jid}: ${text}`);
       const lower = text.toLowerCase().trim();
 
-      // Quick commands
+      // Quick commands — bypass AI to save tokens
       if (lower === "price" || lower === "p") {
         const result = await executeTradingTool("get_xauusd_price", {});
         await whatsapp.sendMessage(jid, result);
@@ -100,14 +100,8 @@ async function main() {
       }
 
       if (lower === "signal" || lower === "s" || lower === "analyze") {
-        const result = await executeTradingTool("analyze_xauusd", { timeframe: "15min" });
-        await whatsapp.sendMessage(jid, result);
-        return;
-      }
-
-      if (lower.startsWith("analyze ")) {
-        const tf = lower.replace("analyze ", "").trim();
-        const result = await executeTradingTool("analyze_xauusd", { timeframe: tf });
+        // Deep multi-TF signal — runs directly, no AI overhead
+        const result = await executeTradingTool("generate_signal", {});
         await whatsapp.sendMessage(jid, result);
         return;
       }
@@ -120,19 +114,14 @@ async function main() {
 
       if (lower === "help" || lower === "h") {
         await whatsapp.sendMessage(jid, [
-          `🥇 *Goldie -- XAUUSD Trading Bot*`,
+          `🥇 *Goldie — XAUUSD Bot*`,
           ``,
-          `Quick commands:`,
-          `  *price* (p) -- Current XAUUSD price`,
-          `  *signal* (s) -- Generate trading signal (15min)`,
-          `  *analyze 5min* -- Signal for specific timeframe`,
-          `  *overview* (o) -- Multi-timeframe overview`,
-          `  *help* (h) -- This help message`,
+          `*signal* (s) — Deep trading signal`,
+          `*price* (p) — Current price`,
+          `*overview* (o) — Multi-TF snapshot`,
+          `*help* (h) — This message`,
           ``,
-          `Or just ask me anything about gold trading!`,
-          ``,
-          `⚙️ Auto-scanning every ${SCAN_INTERVAL / 60000} min.`,
-          `📱 Alerts sent when confidence >= ${MIN_CONFIDENCE}%`,
+          `Or ask me anything about gold!`,
         ].join("\n"));
         return;
       }

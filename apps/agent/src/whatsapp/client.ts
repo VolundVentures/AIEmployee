@@ -87,27 +87,77 @@ export class WhatsAppClient extends EventEmitter {
    *             or plain number (e.g. "971589115381")
    * @param text Message body
    */
+  /**
+   * Send a WhatsApp message, automatically splitting into chunks if it
+   * exceeds Twilio's 1600-character limit for sandbox numbers.
+   */
   async sendMessage(jid: string, text: string): Promise<void> {
     if (!this.connected || !this.twilioClient) {
       console.warn("[WhatsApp] Cannot send — not connected. Skipping.");
       return;
     }
 
+    const chunks = this.splitMessage(text, 1500);
+
     const from = `whatsapp:${this.twilioNumber}`;
     const to = this.jidToTwilio(jid);
-    console.log(`[WhatsApp] Sending: from=${from} to=${to} body="${text.slice(0, 80)}..."`);
 
-    try {
-      const result = await this.twilioClient.messages.create({
-        body: text,
-        from,
-        to,
-      });
-      console.log(`[WhatsApp] Sent OK (SID: ${result.sid})`);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[WhatsApp] Failed to send message: ${msg}`);
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const label = chunks.length > 1 ? ` [${i + 1}/${chunks.length}]` : "";
+      console.log(`[WhatsApp] Sending${label}: from=${from} to=${to} body="${chunk.slice(0, 80)}..."`);
+
+      try {
+        const result = await this.twilioClient.messages.create({
+          body: chunk,
+          from,
+          to,
+        });
+        console.log(`[WhatsApp] Sent OK${label} (SID: ${result.sid})`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[WhatsApp] Failed to send message${label}: ${msg}`);
+      }
+
+      // Small delay between chunks to preserve ordering
+      if (i < chunks.length - 1) {
+        await new Promise((r) => setTimeout(r, 300));
+      }
     }
+  }
+
+  /**
+   * Split text into chunks of at most `maxLen` characters, breaking on
+   * newline boundaries so messages stay readable.
+   */
+  private splitMessage(text: string, maxLen: number): string[] {
+    if (text.length <= maxLen) return [text];
+
+    const chunks: string[] = [];
+    let remaining = text;
+
+    while (remaining.length > 0) {
+      if (remaining.length <= maxLen) {
+        chunks.push(remaining);
+        break;
+      }
+
+      // Find the last newline within the limit
+      let breakAt = remaining.lastIndexOf("\n", maxLen);
+      if (breakAt <= 0) {
+        // No newline found — break at a space
+        breakAt = remaining.lastIndexOf(" ", maxLen);
+      }
+      if (breakAt <= 0) {
+        // No space either — hard break
+        breakAt = maxLen;
+      }
+
+      chunks.push(remaining.slice(0, breakAt));
+      remaining = remaining.slice(breakAt + 1); // +1 to skip the newline/space
+    }
+
+    return chunks;
   }
 
   getSocket(): null {
