@@ -18,7 +18,17 @@
  *   MIN_CONFIDENCE       -- Minimum confidence % to send alert (default: 40)
  */
 
-import "dotenv/config";
+import dotenv from "dotenv";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+// Load .env from multiple locations (monorepo root, apps/agent, or script dir)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+dotenv.config({ path: resolve(__dirname, "../../../.env") });   // monorepo root
+dotenv.config({ path: resolve(__dirname, "../.env") });          // apps/agent/
+dotenv.config();                                                  // cwd fallback
+
 import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
 import { MarketDataProvider } from "./trading/market-data.js";
@@ -51,7 +61,13 @@ async function main() {
 
   // Validate
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("[Goldie] Missing ANTHROPIC_API_KEY");
+    const root = resolve(__dirname, "../../../.env");
+    const agent = resolve(__dirname, "../.env");
+    console.error("[Goldie] Missing ANTHROPIC_API_KEY. Checked these .env locations:");
+    console.error(`  - ${root}`);
+    console.error(`  - ${agent}`);
+    console.error(`  - ${resolve(process.cwd(), ".env")} (cwd)`);
+    console.error("[Goldie] Copy .env.example to .env and fill in your keys.");
     process.exit(1);
   }
   if (!ALERT_PHONE) {

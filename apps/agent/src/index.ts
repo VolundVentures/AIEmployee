@@ -1,4 +1,14 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+
+// Load .env from multiple locations (monorepo root, apps/agent, or cwd)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+dotenv.config({ path: resolve(__dirname, "../../../.env") });   // monorepo root
+dotenv.config({ path: resolve(__dirname, "../.env") });          // apps/agent/
+dotenv.config();                                                  // cwd fallback
+
 import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
 import { OnboardingFlow } from "./onboarding/flow.js";
