@@ -11,6 +11,7 @@ import { SkillRegistry } from "../skills/registry.js";
 import { SkillLoader } from "../skills/loader.js";
 import { webSearch } from "./web-search.js";
 import { AutonomyController } from "../autonomy/controller.js";
+import { TRADING_TOOLS, executeTradingTool, isTradingTool } from "../trading/tools.js";
 
 type Message = Anthropic.MessageParam;
 
@@ -89,7 +90,7 @@ export class AgentEngine {
           model: routing.model,
           max_tokens: modelConfig.maxTokens,
           system: systemPrompt,
-          tools: [...AGENT_TOOLS, ...this.skillLoader.getToolDefinitions()],
+          tools: [...AGENT_TOOLS, ...TRADING_TOOLS, ...this.skillLoader.getToolDefinitions()],
           messages,
         });
       } catch (err) {
@@ -263,6 +264,10 @@ export class AgentEngine {
         }
 
         default: {
+          // Check if it's a trading tool
+          if (isTradingTool(name)) {
+            return await executeTradingTool(name, input);
+          }
           // Check if it's a skill tool
           if (this.skillLoader.isSkillTool(name)) {
             return await this.skillLoader.execute(name, input);

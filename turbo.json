@@ -8,6 +8,10 @@
     "dev": {
       "cache": false,
       "persistent": true
+    },
+    "dev:trading": {
+      "cache": false,
+      "persistent": true
     }
   }
 }
