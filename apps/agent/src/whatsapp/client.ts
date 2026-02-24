@@ -6,7 +6,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import pino from "pino";
-import { rmSync } from "fs";
+import { rmSync, existsSync } from "fs";
 
 const logger = pino({ level: "silent" });
 
@@ -20,7 +20,8 @@ export class WhatsAppClient {
   private socket: WASocket | null = null;
   private messageHandler: MessageHandler | null = null;
   private authDir: string;
-  private authCleared = false; // Only clear auth once per run to avoid loops
+  private retryCount = 0;
+  private maxRetries = 5;
 
   constructor(authDir = "./baileys_auth") {
     this.authDir = authDir;
@@ -53,40 +54,43 @@ export class WhatsAppClient {
 
       if (connection === "close") {
         const reason = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const reasonName = DisconnectReason[reason] || String(reason);
 
-        console.log(
-          `[WhatsApp] Connection closed. Reason: ${DisconnectReason[reason] || reason}.`
-        );
+        console.log(`[WhatsApp] Connection closed. Reason: ${reasonName} (${reason}).`);
 
-        // 405 = stale session, 401 = unauthorized
-        if (reason === 405 || reason === 401) {
-          if (!this.authCleared) {
-            this.authCleared = true;
-            console.log("[WhatsApp] Session expired. Clearing auth state...");
-            try { rmSync(this.authDir, { recursive: true, force: true }); } catch {}
-            console.log("[WhatsApp] Reconnecting in 3 seconds (you'll need to scan a new QR)...");
-            await sleep(3000);
-            this.connect();
+        // loggedOut = user explicitly unpaired. Clear auth and stop.
+        if (reason === DisconnectReason.loggedOut) {
+          console.log("[WhatsApp] Logged out by user. Clearing session...");
+          try { rmSync(this.authDir, { recursive: true, force: true }); } catch {}
+          console.log("[WhatsApp] Restart the bot to get a fresh QR code.");
+          return;
+        }
+
+        // Everything else (405, 408, 428, 440, 500, 515, etc.) = transient.
+        // Reconnect with exponential backoff.
+        this.retryCount++;
+
+        if (this.retryCount > this.maxRetries) {
+          console.log(`[WhatsApp] Failed after ${this.maxRetries} retries. Giving up.`);
+          console.log("[WhatsApp] Try these steps:");
+          console.log("  1. Stop the bot");
+          if (existsSync(this.authDir)) {
+            console.log(`  2. Delete the auth folder: rm -rf ${this.authDir}`);
+            console.log("  3. Restart the bot and scan the new QR code");
           } else {
-            console.log("[WhatsApp] Auth already cleared but still failing.");
-            console.log("[WhatsApp] Please restart the bot and scan the QR code when it appears.");
+            console.log("  2. Restart the bot and scan the QR code");
           }
           return;
         }
 
-        if (reason === DisconnectReason.loggedOut) {
-          console.log("[WhatsApp] Logged out. Restart the bot to re-scan QR.");
-          return;
-        }
-
-        // For other transient errors, reconnect with a delay
-        console.log("[WhatsApp] Reconnecting in 3 seconds...");
-        await sleep(3000);
+        const delay = Math.min(2000 * Math.pow(2, this.retryCount - 1), 60000);
+        console.log(`[WhatsApp] Retry ${this.retryCount}/${this.maxRetries} in ${delay / 1000}s...`);
+        await sleep(delay);
         this.connect();
       }
 
       if (connection === "open") {
-        this.authCleared = false; // Reset on successful connection
+        this.retryCount = 0; // Reset on successful connection
         console.log("[WhatsApp] Connected successfully!");
       }
     });
