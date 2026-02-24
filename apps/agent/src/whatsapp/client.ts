@@ -33,7 +33,9 @@ export class WhatsAppClient extends EventEmitter {
     super();
     // _authDir is ignored — Twilio handles auth via API keys, not local files.
     // Parameter kept for backward compatibility with existing instantiation.
-    this.twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || "";
+    // Strip any "whatsapp:" prefix the user may have included — we add it when needed
+    const rawNumber = process.env.TWILIO_WHATSAPP_NUMBER || "";
+    this.twilioNumber = rawNumber.replace(/^whatsapp:/i, "");
     this.webhookPort = parseInt(process.env.WEBHOOK_PORT || "3001", 10);
   }
 
