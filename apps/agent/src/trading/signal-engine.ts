@@ -106,32 +106,41 @@ export class SignalEngine {
     let bearScore = 0;
     const reasons: string[] = [];
 
-    // 1. EMA crossover (trend)
-    if (ema20[last] > ema50[last]) {
-      bullScore++;
-      if (ema20[last - 1] <= ema50[last - 1]) {
-        bullScore++; // fresh crossover = extra point
-        reasons.push("EMA 20/50 bullish crossover (fresh)");
-      } else {
-        reasons.push("EMA 20 above EMA 50 (uptrend)");
-      }
-    } else if (ema20[last] < ema50[last]) {
-      bearScore++;
-      if (ema20[last - 1] >= ema50[last - 1]) {
+    // 1. EMA crossover (trend) — guard against NaN
+    const ema20Last = ema20[last];
+    const ema50Last = ema50[last];
+    const ema20Prev = ema20[last - 1];
+    const ema50Prev = ema50[last - 1];
+
+    if (isFinite(ema20Last) && isFinite(ema50Last)) {
+      if (ema20Last > ema50Last) {
+        bullScore++;
+        if (isFinite(ema20Prev) && isFinite(ema50Prev) && ema20Prev <= ema50Prev) {
+          bullScore++; // fresh crossover = extra point
+          reasons.push("EMA 20/50 bullish crossover (fresh)");
+        } else {
+          reasons.push("EMA 20 above EMA 50 (uptrend)");
+        }
+      } else if (ema20Last < ema50Last) {
         bearScore++;
-        reasons.push("EMA 20/50 bearish crossover (fresh)");
-      } else {
-        reasons.push("EMA 20 below EMA 50 (downtrend)");
+        if (isFinite(ema20Prev) && isFinite(ema50Prev) && ema20Prev >= ema50Prev) {
+          bearScore++;
+          reasons.push("EMA 20/50 bearish crossover (fresh)");
+        } else {
+          reasons.push("EMA 20 below EMA 50 (downtrend)");
+        }
       }
     }
 
     // 2. Price vs EMA (trend confirmation)
-    if (currentPrice > ema20[last] && currentPrice > ema50[last]) {
-      bullScore++;
-      reasons.push("Price above both EMAs");
-    } else if (currentPrice < ema20[last] && currentPrice < ema50[last]) {
-      bearScore++;
-      reasons.push("Price below both EMAs");
+    if (isFinite(ema20Last) && isFinite(ema50Last)) {
+      if (currentPrice > ema20Last && currentPrice > ema50Last) {
+        bullScore++;
+        reasons.push("Price above both EMAs");
+      } else if (currentPrice < ema20Last && currentPrice < ema50Last) {
+        bearScore++;
+        reasons.push("Price below both EMAs");
+      }
     }
 
     // 3. RSI
@@ -152,24 +161,26 @@ export class SignalEngine {
       }
     }
 
-    // 4. MACD
+    // 4. MACD — guard against NaN
     const macdHist = macdResult.histogram[last];
     const macdHistPrev = macdResult.histogram[last - 1];
-    if (macdHist > 0) {
-      bullScore++;
-      if (macdHistPrev <= 0) {
+    if (isFinite(macdHist)) {
+      if (macdHist > 0) {
         bullScore++;
-        reasons.push("MACD histogram turned positive (bullish momentum)");
-      } else {
-        reasons.push("MACD histogram positive");
-      }
-    } else if (macdHist < 0) {
-      bearScore++;
-      if (macdHistPrev >= 0) {
+        if (isFinite(macdHistPrev) && macdHistPrev <= 0) {
+          bullScore++;
+          reasons.push("MACD histogram turned positive (bullish momentum)");
+        } else {
+          reasons.push("MACD histogram positive");
+        }
+      } else if (macdHist < 0) {
         bearScore++;
-        reasons.push("MACD histogram turned negative (bearish momentum)");
-      } else {
-        reasons.push("MACD histogram negative");
+        if (isFinite(macdHistPrev) && macdHistPrev >= 0) {
+          bearScore++;
+          reasons.push("MACD histogram turned negative (bearish momentum)");
+        } else {
+          reasons.push("MACD histogram negative");
+        }
       }
     }
 
@@ -198,8 +209,8 @@ export class SignalEngine {
     // 7. Pivot point proximity
     const distToS1 = Math.abs(currentPrice - pivots.s1);
     const distToR1 = Math.abs(currentPrice - pivots.r1);
-    // Use ATR value, fallback to 0.15% of price (not a hardcoded dollar amount)
-    const atrVal = atr14[last] || currentPrice * 0.0015;
+    // Use ATR value, fallback to 0.15% of price (~$4.35 at $2900)
+    const atrVal = isFinite(atr14[last]) && atr14[last] > 0 ? atr14[last] : currentPrice * 0.0015;
 
     if (distToS1 < atrVal * 0.5 && currentPrice >= pivots.s1) {
       bullScore++;

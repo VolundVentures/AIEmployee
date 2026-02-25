@@ -23,8 +23,23 @@ export function sma(closes: number[], period: number): number[] {
 // ─── Exponential Moving Average ──────────────────────────────────
 
 export function ema(closes: number[], period: number): number[] {
+  if (closes.length === 0) return [];
+
   const k = 2 / (period + 1);
-  const result: number[] = [closes[0]];
+
+  // Seed with SMA of first `period` values for accuracy (Wilder's method).
+  // Without this, EMA(50) on 100 bars has ~14% weight from the arbitrary
+  // first close, which can shift the EMA by ~$40 on gold at $2900.
+  let seed: number;
+  if (closes.length >= period) {
+    let sum = 0;
+    for (let i = 0; i < period; i++) sum += closes[i];
+    seed = sum / period;
+  } else {
+    seed = closes[0];
+  }
+
+  const result: number[] = [seed];
   for (let i = 1; i < closes.length; i++) {
     result.push(closes[i] * k + result[i - 1] * (1 - k));
   }
@@ -209,15 +224,20 @@ export interface PivotLevels {
 
 export function pivotPoints(candles: Candle[]): PivotLevels {
   // Use the full previous session's H/L/C for pivot calculation.
-  // For intraday data we aggregate the prior day's candles to get true
-  // daily high/low/close. Falls back to last 24 candles if fewer available.
-  //
-  // This gives realistic S/R levels — a single candle's H/L/C is too tight.
+  // Gold session boundary: 5:00 PM ET = 22:00 UTC (not midnight UTC).
+  // Falls back to last 24 candles if insufficient history.
 
-  // Find the last completed "day" boundary (candles before today)
   const now = candles[candles.length - 1]?.timestamp || Date.now();
+  const nowDate = new Date(now);
+
+  // Gold session starts at 22:00 UTC. Find the most recent 22:00 UTC boundary.
   const todayStart = new Date(now);
-  todayStart.setUTCHours(0, 0, 0, 0);
+  todayStart.setUTCMinutes(0, 0, 0);
+  todayStart.setUTCHours(22);
+  // If current time is before 22:00 UTC today, session started yesterday at 22:00
+  if (nowDate.getTime() < todayStart.getTime()) {
+    todayStart.setUTCDate(todayStart.getUTCDate() - 1);
+  }
   const todayMs = todayStart.getTime();
 
   // Gather all candles from the previous session (before today's midnight)

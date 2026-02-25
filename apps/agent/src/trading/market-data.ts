@@ -2,14 +2,11 @@
  * Market data fetcher for XAUUSD (Gold/USD).
  *
  * Data sources (in priority order):
- *   1. Twelve Data API (free tier: 800 req/day) — XAU/USD spot ✅
- *   2. Yahoo Finance GC=F (Gold Futures) — reliable, but ~$20-30 above spot ⚠️
+ *   1. Twelve Data API (free tier: 800 req/day) — XAU/USD spot
+ *   2. Yahoo Finance GC=F (Gold Futures) — reliable fallback, ~$20-30 above spot
  *
- * NOTE on Yahoo Finance: The v8 chart API does NOT reliably support forex-style
- * tickers like XAUUSD=X — it returns empty data. The only working gold ticker is
- * GC=F (COMEX futures). We use it as fallback but clearly label it as futures.
- *
- * For accurate spot prices, set TWELVE_DATA_API_KEY (free at twelvedata.com).
+ * NOTE: Yahoo's v8 chart API does NOT support XAUUSD=X (returns empty data).
+ * The only working gold ticker is GC=F (COMEX futures), used as last resort.
  */
 
 export interface Candle {
@@ -39,7 +36,30 @@ export interface CandleData {
   candles: Candle[];
   timeframe: string;
   symbol: string;
-  source: string;   // "twelvedata" | "yahoo-futures"
+  source: string;
+}
+
+// --------------- Candle validation ---------------
+
+/**
+ * Filter out bad candles (NaN, zero, null OHLC values).
+ * Gold has a daily maintenance break (~5-6pm ET) where Twelve Data
+ * can return candles with null/zero values. A single bad candle
+ * corrupts ALL indicators (EMA, RSI, ATR, BB — everything).
+ */
+function filterValidCandles(candles: Candle[], source: string): Candle[] {
+  const valid = candles.filter((c) =>
+    c.close > 0 && c.open > 0 && c.high > 0 && c.low > 0 &&
+    isFinite(c.close) && isFinite(c.open) && isFinite(c.high) && isFinite(c.low) &&
+    isFinite(c.timestamp)
+  );
+
+  const dropped = candles.length - valid.length;
+  if (dropped > 0) {
+    console.warn(`[MarketData] Dropped ${dropped}/${candles.length} bad candles from ${source} (NaN/zero/null OHLC)`);
+  }
+
+  return valid;
 }
 
 // --------------- Twelve Data (primary — spot XAU/USD) ---------------
@@ -61,14 +81,23 @@ async function fetchTwelveDataCandles(
     throw new Error("Twelve Data: no candle values returned");
   }
 
-  return (data.values as any[]).map((v: any) => ({
-    timestamp: new Date(v.datetime).getTime(),
+  const raw = (data.values as any[]).map((v: any) => ({
+    // Twelve Data returns "YYYY-MM-DD HH:mm:ss" — append Z for UTC
+    timestamp: new Date(v.datetime + "Z").getTime(),
     open: parseFloat(v.open),
     high: parseFloat(v.high),
     low: parseFloat(v.low),
     close: parseFloat(v.close),
     volume: parseFloat(v.volume || "0"),
   })).reverse(); // oldest first
+
+  const candles = filterValidCandles(raw, `TwelveData ${interval}`);
+
+  if (candles.length < 20) {
+    throw new Error(`Twelve Data: only ${candles.length} valid candles after filtering (need >= 20)`);
+  }
+
+  return candles;
 }
 
 async function fetchTwelveDataQuote(apiKey: string): Promise<MarketSnapshot> {
@@ -81,7 +110,9 @@ async function fetchTwelveDataQuote(apiKey: string): Promise<MarketSnapshot> {
   }
 
   const price = parseFloat(data.close);
-  if (!price || price <= 0) throw new Error("Twelve Data: invalid price");
+  if (!price || !isFinite(price) || price <= 0) {
+    throw new Error(`Twelve Data: invalid price (raw close=${data.close})`);
+  }
 
   return {
     symbol: "XAUUSD",
@@ -99,10 +130,6 @@ async function fetchTwelveDataQuote(apiKey: string): Promise<MarketSnapshot> {
 }
 
 // --------------- Yahoo Finance (fallback — GC=F Gold Futures) ---------------
-//
-// WARNING: GC=F is COMEX Gold Futures, NOT spot XAUUSD.
-// Futures trade ~$20-30 above spot due to cost of carry.
-// We use this as a last resort and clearly mark it in the output.
 
 const YAHOO_SYMBOL = "GC=F";
 const YAHOO_HEADERS = { "User-Agent": "Mozilla/5.0" };
@@ -115,7 +142,6 @@ async function fetchYahooCandles(
   const res = await fetch(url, { headers: YAHOO_HEADERS });
   const data = (await res.json()) as any;
 
-  // Log errors from Yahoo for debugging
   if (data.chart?.error) {
     throw new Error(`Yahoo Finance error: ${JSON.stringify(data.chart.error)}`);
   }
@@ -128,14 +154,22 @@ async function fetchYahooCandles(
 
   const quotes = result.indicators.quote[0];
 
-  return timestamps.map((ts: number, i: number) => ({
+  const raw = timestamps.map((ts: number, i: number) => ({
     timestamp: ts * 1000,
     open: quotes.open[i] ?? 0,
     high: quotes.high[i] ?? 0,
     low: quotes.low[i] ?? 0,
     close: quotes.close[i] ?? 0,
     volume: quotes.volume[i] ?? 0,
-  })).filter((c: Candle) => c.close > 0);
+  }));
+
+  const candles = filterValidCandles(raw, `Yahoo ${interval}`);
+
+  if (candles.length < 10) {
+    throw new Error(`Yahoo Finance: only ${candles.length} valid candles after filtering`);
+  }
+
+  return candles;
 }
 
 async function fetchYahooQuote(): Promise<MarketSnapshot> {
@@ -198,19 +232,14 @@ export class MarketDataProvider {
     this.twelveDataKey = process.env.TWELVE_DATA_API_KEY;
     if (!this.twelveDataKey) {
       console.warn(
-        "[MarketData] ⚠️  No TWELVE_DATA_API_KEY set.\n" +
-        "[MarketData]    Falling back to Yahoo Finance GC=F (Gold FUTURES — prices ~$20-30 above spot).\n" +
-        "[MarketData]    For accurate spot XAUUSD, get a free key at https://twelvedata.com (800 req/day)."
+        "[MarketData] No TWELVE_DATA_API_KEY set.\n" +
+        "[MarketData] Falling back to Yahoo Finance GC=F (Gold FUTURES — prices ~$20-30 above spot).\n" +
+        "[MarketData] For accurate spot XAUUSD, get a free key at https://twelvedata.com"
       );
     }
   }
 
-  /**
-   * Get current XAUUSD quote (price, spread, 24h change).
-   * Returns spot via Twelve Data, or futures via Yahoo as fallback.
-   */
   async getQuote(): Promise<MarketSnapshot> {
-    // Try Twelve Data first (spot)
     if (this.twelveDataKey) {
       try {
         const quote = await fetchTwelveDataQuote(this.twelveDataKey);
@@ -221,7 +250,6 @@ export class MarketDataProvider {
       }
     }
 
-    // Fallback to Yahoo GC=F (futures)
     try {
       const quote = await fetchYahooQuote();
       console.log(`[MarketData] Quote from Yahoo GC=F (futures): $${quote.price.toFixed(2)}`);
@@ -232,24 +260,17 @@ export class MarketDataProvider {
     }
   }
 
-  /**
-   * Get OHLCV candles for technical analysis.
-   * @param timeframe  "1min" | "5min" | "15min" | "1h" | "4h" | "1day"
-   * @param count Number of candles
-   */
   async getCandles(timeframe: string = "5min", count: number = 100): Promise<CandleData> {
-    // Try Twelve Data first (supports all timeframes natively, spot)
     if (this.twelveDataKey) {
       try {
         const candles = await fetchTwelveDataCandles(this.twelveDataKey, timeframe, count);
-        console.log(`[MarketData] ${timeframe} candles from Twelve Data (spot): ${candles.length} bars`);
+        console.log(`[MarketData] ${timeframe} candles from Twelve Data (spot): ${candles.length} valid bars`);
         return { candles, timeframe, symbol: "XAUUSD", source: "twelvedata" };
       } catch (err) {
         console.warn(`[MarketData] Twelve Data ${timeframe} candles failed, falling back:`, err);
       }
     }
 
-    // Yahoo fallback — map timeframes (Yahoo has no 4h interval)
     const yahooIntervalMap: Record<string, string> = {
       "1min": "1m", "5min": "5m", "15min": "15m",
       "1h": "1h", "4h": "1h", "1day": "1d",
@@ -264,13 +285,12 @@ export class MarketDataProvider {
       const range = yahooRangeMap[timeframe] || "5d";
       let candles = await fetchYahooCandles(interval, range);
 
-      // Yahoo has no native 4h candles — aggregate from 1h
       if (timeframe === "4h") {
         candles = aggregateTo4h(candles);
       }
 
       candles = candles.slice(-count);
-      console.log(`[MarketData] ${timeframe} candles from Yahoo GC=F (futures): ${candles.length} bars`);
+      console.log(`[MarketData] ${timeframe} candles from Yahoo GC=F (futures): ${candles.length} valid bars`);
       return { candles, timeframe, symbol: "XAUUSD", source: "yahoo-futures" };
     } catch (err) {
       console.error(`[MarketData] All ${timeframe} candle sources failed:`, err);
@@ -278,9 +298,6 @@ export class MarketDataProvider {
     }
   }
 
-  /**
-   * Get candles for multiple timeframes at once (multi-timeframe analysis).
-   */
   async getMultiTimeframeCandles(): Promise<Record<string, CandleData>> {
     const timeframes = ["5min", "15min", "1h", "4h"];
     const results: Record<string, CandleData> = {};
