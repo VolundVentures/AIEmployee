@@ -1,18 +1,13 @@
 {
-  "name": "journeyman",
+  "name": "goldie",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "apps/*"
   ],
   "scripts": {
-    "dev": "turbo dev",
+    "dev": "turbo dev:trading --filter=@goldie/agent",
     "build": "turbo build",
-    "dev:web": "turbo dev --filter=@journeyman/web",
-    "dev:agent": "turbo dev --filter=@journeyman/agent",
-    "build:web": "turbo build --filter=@journeyman/web",
-    "build:agent": "turbo build --filter=@journeyman/agent",
-    "trading-bot": "turbo dev:trading --filter=@journeyman/agent"
+    "trading-bot": "turbo dev:trading --filter=@goldie/agent"
   },
   "devDependencies": {
     "turbo": "^2.4.0",

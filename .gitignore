@@ -6,12 +6,13 @@ dist/
 .env.local
 *.log
 
-# Baileys auth state
+# Baileys / WhatsApp auth state
 auth_state/
 baileys_auth/
+baileys_auth_goldie/
 
-# Supabase
-.supabase/
+# Goldie local memory / data
+data/
 
 # OS
 .DS_Store

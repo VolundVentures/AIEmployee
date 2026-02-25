@@ -1,78 +1,75 @@
-# Journeyman
+# Goldie
 
-**AI employees that learn your business, acquire skills on the fly, and get work done -- delivered through WhatsApp.**
+**AI-powered XAUUSD (Gold) trading signals via WhatsApp.**
 
 By [Volund Ventures](https://volund.ventures).
 
+## What It Does
+
+Goldie runs a heartbeat every 15 minutes during market hours:
+
+1. Fetches multi-timeframe market data (4H, 1H, 15M)
+2. Computes 15+ technical indicators (EMA, RSI, MACD, ATR, pivots, VWAP, ADX, etc.)
+3. Detects price structure: swing points, Fair Value Gaps, Order Blocks, liquidity levels
+4. Feeds everything to Claude Sonnet for Smart Money analysis
+5. Sends a trade signal (BUY/SELL with entry, stop, targets) via WhatsApp
+6. Saves context to memory for continuity across heartbeats
+
+Automatically pauses when the market is closed (weekends + daily maintenance).
+
 ## Quick Start
 
-### Prerequisites
-
-- Node.js 18+
-- An [Anthropic API key](https://console.anthropic.com/)
-- A [Supabase](https://supabase.com/) project (free tier works)
-- A phone number for WhatsApp (the bot will use this number)
-
-### Setup
-
 ```bash
-# Clone and install
-git clone <repo-url> journeyman
-cd journeyman
+# Install
 npm install
 
-# Configure environment
+# Configure
 cp .env.example .env
-# Edit .env with your API keys
+# Fill in: ANTHROPIC_API_KEY, Twilio creds, ALERT_PHONE
 
-# Set up the database
-# Copy the contents of packages/db/schema.sql into your Supabase SQL editor and run it
-
-# Start the web app
-npm run dev:web
-
-# Start the WhatsApp agent (in another terminal)
-npm run dev:agent
-# Scan the QR code with your WhatsApp app
+# Run
+npm run dev
 ```
 
-### First Run
+## WhatsApp Commands
 
-1. Start the agent -- it will show a QR code in terminal
-2. Scan the QR code with WhatsApp on your phone
-3. Send a message to the connected number from any WhatsApp account
-4. Atlas (your AI Chief of Staff) will respond
+| Command | Shortcut | What it does |
+|---------|----------|-------------|
+| `signal` | `s` | Full trading signal |
+| `price` | `p` | Current gold price |
+| `overview` | `o` | Multi-timeframe snapshot |
+| `heartbeat` | `hb` | Run analysis now |
+| `help` | `h` | Show commands |
+
+Or just chat naturally — Goldie answers gold-related questions.
 
 ## Architecture
 
 ```
-journeyman/
-├── apps/
-│   ├── web/        # Next.js 15 web platform (landing, onboarding, dashboard)
-│   └── agent/      # WhatsApp agent backend (Baileys + Claude Agent SDK)
-└── packages/
-    ├── db/         # Supabase client + schema
-    └── shared/     # Types + constants shared across apps
+goldie/
+└── apps/agent/src/
+    ├── trading-bot.ts       # Entry point + heartbeat loop
+    ├── trading/
+    │   ├── strategy-engine  # Sonnet-powered trade decisions
+    │   ├── signal-engine    # Multi-TF indicator analysis
+    │   ├── indicators       # 15+ technical indicators (pure TS)
+    │   ├── market-data      # Yahoo Finance + Twelve Data
+    │   ├── tools            # WhatsApp tool definitions
+    │   └── persona          # Goldie's personality
+    ├── agent/engine          # Claude API client + tool loop
+    ├── memory/store          # Local JSON persistence
+    └── whatsapp/client       # Twilio WhatsApp integration
 ```
 
-### Smart Model Routing
+## Environment Variables
 
-Messages are routed to the optimal model tier for cost efficiency:
+See `.env.example` for the full list. Key ones:
 
-| Complexity | Model | Speed | Use Case |
-|-----------|-------|-------|----------|
-| Simple | Haiku 4.5 | <1s | Greetings, status, lookups |
-| Moderate | Sonnet 4.6 | 2-5s | Drafting, analysis, summaries |
-| Complex | Opus 4.6 | 10-20s | Research, strategy, code |
-
-## Development
-
-```bash
-npm run dev         # Run all apps
-npm run dev:web     # Web app only (localhost:3000)
-npm run dev:agent   # WhatsApp agent only
-npm run build       # Build all
-```
+- `ANTHROPIC_API_KEY` — Claude API key (required)
+- `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_WHATSAPP_NUMBER` — WhatsApp via Twilio
+- `ALERT_PHONE` — Your WhatsApp number to receive signals
+- `TWELVE_DATA_API_KEY` — Better market data (optional, falls back to Yahoo Finance)
+- `ACCOUNT_SIZE` / `LOT_SIZE` / `RISK_PERCENT` — Trading account config
 
 ## License
 

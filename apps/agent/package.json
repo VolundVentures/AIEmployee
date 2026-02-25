@@ -1,21 +1,16 @@
 {
-  "name": "@journeyman/agent",
+  "name": "@goldie/agent",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
     "dev:trading": "tsx watch src/trading-bot.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
-    "trading-bot": "node dist/trading-bot.js"
+    "start": "node dist/trading-bot.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@journeyman/db": "*",
-    "@journeyman/shared": "*",
     "dotenv": "^16.4.0",
-    "pino": "^9.6.0",
     "twilio": "^5.12.2"
   },
   "devDependencies": {
