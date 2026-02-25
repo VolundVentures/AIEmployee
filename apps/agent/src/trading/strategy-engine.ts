@@ -9,13 +9,14 @@
  *   1. signal-engine.ts computes all indicators (free, instant)
  *   2. This engine formats indicators into a structured prompt
  *   3. Sonnet analyzes and returns a JSON trade decision
- *   4. Risk validator ensures SL is within account budget
+ *   4. Risk calculator shows actual risk (user decides)
  *
  * Setups Sonnet looks for:
  *   - Trend Pullback (ADX > 25, price pulls back to EMA, bounces)
  *   - Range Bounce (ADX < 20, price at BB band + RSI extreme)
  *   - Squeeze Breakout (BB bandwidth expanding from < 3%)
  *   - Divergence Reversal (RSI divergence at key level)
+ *   - Strong Momentum (clear directional move across timeframes)
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -32,7 +33,7 @@ export interface AccountConfig {
 
 export interface StrategyDecision {
   action: "BUY" | "SELL" | "NO_TRADE";
-  setup: "trend_pullback" | "range_bounce" | "squeeze_breakout" | "divergence_reversal" | "none";
+  setup: "trend_pullback" | "range_bounce" | "squeeze_breakout" | "divergence_reversal" | "strong_momentum" | "none";
   confidence: number;
   entry: number;
   stopLoss: number;
@@ -67,26 +68,26 @@ function calculateRiskParams(config: AccountConfig) {
 function buildSystemPrompt(config: AccountConfig): string {
   const { dollarPerPoint, maxRiskDollars, maxSlDistance } = calculateRiskParams(config);
 
-  return `You are an expert XAUUSD (Gold/USD) intraday trader. You receive structured technical indicator data from multiple timeframes and must determine if there is a high-probability trading setup RIGHT NOW.
+  return `You are an expert XAUUSD (Gold/USD) intraday trader. You receive structured technical indicator data from multiple timeframes and must determine if there is a trading setup RIGHT NOW.
 
-## Account Constraints
+## Account Info
 - Account: $${config.accountSize}
-- Position: ${config.lotSize} lots (${dollarPerPoint} oz gold = $${dollarPerPoint} per $1 move)
-- Max risk per trade: ${config.riskPercent}% = $${maxRiskDollars}
-- Max stop-loss distance: $${maxSlDistance.toFixed(2)} from entry
-- Target profit per trade: $7-15 ($3.50-$7.50 gold move)
+- Position: ${config.lotSize} lots ($${dollarPerPoint} per $1 gold move)
+- Preferred stop-loss: $${maxSlDistance.toFixed(0)} or less from entry (keeps risk under ${config.riskPercent}%)
+- Wider stops are OK when the setup demands it — just note the actual risk
+- Always use a logical stop (below support/above resistance), not an arbitrary distance
 
 ## Setup Identification
 
-Look for EXACTLY these setups. If none match cleanly, output NO_TRADE.
+Look for these setups. Be selective but not paralyzed — if the market is clearly moving in one direction with decent momentum, that IS a setup. Don't force trades in choppy/directionless markets, but do signal when there's a clear move happening.
 
 ### 1. Trend Pullback (TRENDING regime, ADX > 25)
 - 4H: Clear trend structure (EMA20 > EMA50 for bull, or < for bear)
 - 1H: Price has pulled back toward EMA20 or EMA50
 - 15M: RSI bouncing from 40-55 zone (bull) or 45-60 (bear), Stochastic crossing in trend direction
-- MACD histogram should be flattening or turning in trend direction
+- MACD histogram flattening or turning in trend direction
 - Entry: at current price after bounce confirmation
-- SL: below recent 15m swing low/high (MUST be within $${maxSlDistance.toFixed(1)})
+- SL: below recent swing low/high
 - TP: next pivot level, R1/R2 for buys, S1/S2 for sells
 
 ### 2. Range Bounce (RANGING regime, ADX < 20)
@@ -95,7 +96,7 @@ Look for EXACTLY these setups. If none match cleanly, output NO_TRADE.
 - Stochastic in extreme zone (< 20 for buys, > 80 for sells) and crossing
 - Better if RSI divergence is present
 - Entry: at current price near the band
-- SL: beyond the band by $1-2 (MUST be within $${maxSlDistance.toFixed(1)})
+- SL: beyond the band by $1-2
 - TP: BB middle band or opposite band
 
 ### 3. Squeeze Breakout (BB bandwidth was < 3%, now expanding)
@@ -104,7 +105,7 @@ Look for EXACTLY these setups. If none match cleanly, output NO_TRADE.
 - MACD confirming breakout direction
 - Price breaking above recent range highs (BUY) or below lows (SELL)
 - Entry: at current price on breakout
-- SL: below breakout level (MUST be within $${maxSlDistance.toFixed(1)})
+- SL: below breakout level
 - TP: ATR-based projection
 
 ### 4. Divergence Reversal (any regime)
@@ -112,24 +113,40 @@ Look for EXACTLY these setups. If none match cleanly, output NO_TRADE.
 - Price at a key level: pivot point, BB band, or near EMA200
 - Stochastic confirming the reversal direction
 - Entry: at current price
-- SL: beyond the extreme (MUST be within $${maxSlDistance.toFixed(1)})
+- SL: beyond the extreme
 - TP: next pivot level
 
-## Risk Rules — STRICT
-- Stop-loss MUST be within $${maxSlDistance.toFixed(1)} of entry. Violations will be rejected.
-- Minimum risk:reward ratio of 1.5 (prefer 2.0+)
-- Do NOT trade against EMA200 on 4H unless divergence confirms reversal
-- If the setup is marginal or unclear, choose NO_TRADE. Protecting capital > forcing trades.
+### 5. Strong Momentum (any regime, clear directional move)
+- Price has moved significantly in one direction over recent candles (several candles in a row)
+- Multiple timeframes agree on direction (at least 2 of 3)
+- RSI confirms momentum (above 55 for buys, below 45 for sells) but NOT in extreme reversal territory (not above 80 or below 20)
+- MACD histogram growing in the move direction
+- This is the simplest setup: the market is clearly going somewhere, ride it
+- Entry: at current price
+- SL: below the most recent swing low (BUY) or above recent swing high (SELL)
+- TP: next pivot level or projected based on recent move size
+
+## Risk Rules
+- Minimum risk:reward ratio of 1.0. Prefer 1.5+ but 1.0 is acceptable for high-confidence setups.
+- Avoid trading against EMA200 on 4H unless divergence confirms reversal
+- If the market is choppy with no clear direction, output NO_TRADE
 - Consider spread: entry is at ask (BUY) or bid (SELL). Factor ~$0.30-0.50 spread into levels.
+
+## Reasoning Style — CRITICAL
+Write the "reasoning" field in SIMPLE language that someone who doesn't trade would understand.
+- Say "gold is pushing higher, good momentum" NOT "bullish momentum confirmed by MACD histogram expansion"
+- Say "price bounced off a support level" NOT "RSI divergence at S1 pivot with stochastic crossover"
+- Say "market is sideways, no clear direction" NOT "ranging regime with ADX at 15, RSI neutral"
+- Keep it to 1-2 short sentences. Like texting a friend.
 
 ## Output Format — STRICT JSON
 
-You MUST respond with ONLY a JSON object. No markdown, no explanation outside the JSON. The JSON must match this exact structure:
+You MUST respond with ONLY a JSON object. No markdown, no explanation outside the JSON.
 
-{"action":"BUY","setup":"trend_pullback","confidence":72,"entry":2900.50,"stopLoss":2895.50,"takeProfit1":2904.00,"takeProfit2":2908.00,"takeProfit3":2912.00,"riskDollars":10.00,"riskPercent":1.0,"rewardDollars":15.00,"riskReward":1.50,"reasoning":"Clear 1H pullback to EMA20 in established uptrend. RSI bouncing from 48, MACD histogram turning positive. 4H structure intact above EMA200.","regime":"TRENDING"}
+{"action":"BUY","setup":"trend_pullback","confidence":72,"entry":2900.50,"stopLoss":2895.50,"takeProfit1":2904.00,"takeProfit2":2908.00,"takeProfit3":2912.00,"riskDollars":10.00,"riskPercent":1.0,"rewardDollars":15.00,"riskReward":1.50,"reasoning":"Gold dipped and is bouncing back up. The uptrend is still strong.","regime":"TRENDING"}
 
 For NO_TRADE:
-{"action":"NO_TRADE","setup":"none","confidence":0,"entry":0,"stopLoss":0,"takeProfit1":0,"takeProfit2":0,"takeProfit3":0,"riskDollars":0,"riskPercent":0,"rewardDollars":0,"riskReward":0,"reasoning":"Ranging market with ADX at 15. Price in mid-BB range, RSI neutral at 52. No clear setup. Watch for bounce at S1 $2893 or rejection at R1 $2907.","regime":"RANGING"}`;
+{"action":"NO_TRADE","setup":"none","confidence":0,"entry":0,"stopLoss":0,"takeProfit1":0,"takeProfit2":0,"takeProfit3":0,"riskDollars":0,"riskPercent":0,"rewardDollars":0,"riskReward":0,"reasoning":"Market is sideways, no clear direction right now. Waiting for a better opportunity.","regime":"RANGING"}`;
 }
 
 // ─── Prompt Builder ──────────────────────────────────────────────
@@ -285,23 +302,16 @@ export class StrategyEngine {
   }
 
   /**
-   * Validate that the decision respects account risk constraints.
-   * If SL exceeds max distance, downgrade to NO_TRADE.
+   * Recalculate actual risk numbers (don't trust Sonnet's math).
+   * No hard rejection — user sees the risk and decides.
    */
   private validateRisk(decision: StrategyDecision): void {
     if (decision.action === "NO_TRADE") return;
 
-    const { maxSlDistance, maxRiskDollars, dollarPerPoint } = calculateRiskParams(this.config);
+    const { dollarPerPoint } = calculateRiskParams(this.config);
     const slDistance = Math.abs(decision.entry - decision.stopLoss);
 
-    if (slDistance > maxSlDistance * 1.1) {
-      // Allow 10% tolerance, then reject
-      decision.action = "NO_TRADE";
-      decision.reasoning = `[RISK OVERRIDE] SL distance $${slDistance.toFixed(2)} exceeds max $${maxSlDistance.toFixed(2)}. Original: ${decision.reasoning}`;
-      return;
-    }
-
-    // Recalculate risk in case Sonnet got the math wrong
+    // Recalculate risk (don't trust Sonnet's math)
     decision.riskDollars = slDistance * dollarPerPoint;
     decision.riskPercent = (decision.riskDollars / this.config.accountSize) * 100;
 

@@ -245,39 +245,44 @@ function formatOverview(
 }
 
 /**
- * Format a Sonnet strategy decision as a WhatsApp message.
+ * Format a Sonnet strategy decision as a simple WhatsApp message.
  */
 function formatStrategyDecision(decision: StrategyDecision, quote: MarketSnapshot): string {
   const sourceLabel = quote.source === "twelvedata" ? "spot" : "futures";
 
   if (decision.action === "NO_TRADE") {
     return [
-      `⚪ *XAUUSD — NO TRADE* (${decision.regime})`,
+      `⚪ *No trade right now*`,
       ``,
-      `📊 ${decision.reasoning}`,
+      `${decision.reasoning}`,
       ``,
-      `_${sourceLabel} data | AI strategy analysis_`,
+      `_${sourceLabel} data | Will check again next heartbeat_`,
     ].join("\n");
   }
 
   const emoji = decision.action === "BUY" ? "🟢" : "🔴";
+  const actionWord = decision.action === "BUY" ? "Buy at" : "Sell at";
   const setupLabel = decision.setup.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
   const stars =
     decision.confidence >= 75 ? "⭐⭐⭐" :
     decision.confidence >= 55 ? "⭐⭐" : "⭐";
 
+  const riskWarning = decision.riskPercent > 2
+    ? `⚠️ _Higher risk trade (${decision.riskPercent.toFixed(1)}% of account)_\n`
+    : "";
+
   return [
-    `${emoji} *XAUUSD ${decision.action}* — ${setupLabel} ${stars} (${decision.regime})`,
-    `Confidence: ${decision.confidence}% | R:R ${decision.riskReward.toFixed(2)}`,
+    `${emoji} *GOLD ${decision.action}* — ${setupLabel} ${stars}`,
+    `Confidence: ${decision.confidence}%`,
     ``,
-    `📍 Entry: $${decision.entry.toFixed(2)}`,
-    `🛑 SL: $${decision.stopLoss.toFixed(2)} (Risk: $${decision.riskDollars.toFixed(0)} / ${decision.riskPercent.toFixed(1)}%)`,
-    `🎯 TP1: $${decision.takeProfit1.toFixed(2)} | TP2: $${decision.takeProfit2.toFixed(2)} | TP3: $${decision.takeProfit3.toFixed(2)}`,
-    `💰 Target: $${decision.rewardDollars.toFixed(0)} (TP2)`,
+    `📍 ${actionWord}: $${decision.entry.toFixed(2)}`,
+    `🛑 Stop: $${decision.stopLoss.toFixed(2)} (risk $${decision.riskDollars.toFixed(0)})`,
+    `🎯 Target: $${decision.takeProfit1.toFixed(2)} → $${decision.takeProfit2.toFixed(2)} → $${decision.takeProfit3.toFixed(2)}`,
+    `💰 Potential gain: $${decision.rewardDollars.toFixed(0)}`,
     ``,
-    `📊 ${decision.reasoning}`,
+    `${decision.reasoning}`,
     ``,
-    `⚠️ _Max 1-2% risk. Not financial advice. ${sourceLabel} data._`,
+    `${riskWarning}⚠️ _Not financial advice._`,
   ].join("\n");
 }
 
