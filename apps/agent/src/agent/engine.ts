@@ -298,6 +298,10 @@ export class AgentEngine {
     return this.memory;
   }
 
+  isMemoryEnabled(): boolean {
+    return this.memoryEnabled;
+  }
+
   getTasks(): TaskManager {
     return this.tasks;
   }

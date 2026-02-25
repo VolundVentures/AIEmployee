@@ -73,7 +73,8 @@ async function main() {
   }
 
   // Initialize
-  const agent = new AgentEngine(process.env.ANTHROPIC_API_KEY, XAUUSD_TRADER, "goldie-001");
+  // Use EMPLOYEE_ID from env (must be a valid UUID for memory persistence)
+  const agent = new AgentEngine(process.env.ANTHROPIC_API_KEY, XAUUSD_TRADER, process.env.EMPLOYEE_ID);
   const whatsapp = new WhatsAppClient("./baileys_auth_goldie");
 
   console.log(`[Goldie] Heartbeat interval: ${HEARTBEAT_INTERVAL / 60000} minutes`);
@@ -145,7 +146,11 @@ async function main() {
   console.log("[Goldie] Connecting to WhatsApp...");
   await whatsapp.connect();
 
-  // ─── Heartbeat: full AI-powered analysis ───────────────
+  // ─── Heartbeat: direct signal delivery ─────────────────
+  //
+  // Sends the signal engine's formatted output directly via WhatsApp.
+  // No AI rewriting — keeps messages concise and signal-focused.
+  // Saves a summary to memory so the AI can reference it in conversations.
 
   async function runHeartbeat() {
     try {
@@ -157,67 +162,45 @@ async function main() {
         minute: "2-digit",
         hour12: false,
       });
-      const elapsedSinceLast = lastHeartbeatTime
-        ? `${Math.round((now.getTime() - lastHeartbeatTime) / 60000)}min since last`
-        : "first scan";
 
-      console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} at ${timeStr} GST (${elapsedSinceLast})...`);
+      console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} at ${timeStr} GST...`);
 
-      // 1. Fetch all market data ONCE (5 API calls, not 9)
-      //    This stays within Twelve Data's 8 req/min free tier limit.
+      // 1. Fetch all market data ONCE (5 API calls)
       const hbData = await fetchHeartbeatData();
-      const { signalResult, overviewResult } = runHeartbeatAnalysis(hbData);
+      const { signalResult } = runHeartbeatAnalysis(hbData);
 
-      // 2. Build prompt with raw data — AI analyzes with memory context
-      const prompt = [
-        `[HEARTBEAT #${heartbeatCount} — ${timeStr} GST — ${elapsedSinceLast}]`,
+      // 2. Build message: header + price context + signal
+      const q = hbData.quote;
+      const changeSign = q.change24h >= 0 ? "+" : "";
+      const message = [
+        `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST`,
+        `💰 *$${q.price.toFixed(2)}* | ${changeSign}$${q.change24h.toFixed(2)} (${changeSign}${q.changePct24h.toFixed(2)}%)`,
+        `Range: $${q.low24h.toFixed(2)} – $${q.high24h.toFixed(2)}`,
         ``,
-        `Here is the latest market scan. Analyze it using your memory of previous heartbeats.`,
-        ``,
-        `=== SIGNAL ANALYSIS ===`,
         signalResult,
-        ``,
-        `=== MULTI-TF OVERVIEW ===`,
-        overviewResult,
-        ``,
-        `Your analysis should include:`,
-        `1. What changed since your last heartbeat? Any trend shifts, momentum changes, or key level breaks?`,
-        `2. Clear TRADE ACTION: BUY / SELL / WAIT — include entry, SL, TP if actionable`,
-        `3. Key levels to watch until next heartbeat`,
-        `4. If you spot an important pattern shift or trend change compared to previous scans, save it to memory using save_memory`,
-        ``,
-        `Do NOT call generate_signal or get_market_overview — the data is already above.`,
-        `You may call save_memory if you spot something worth remembering.`,
-        `Format for WhatsApp. Be concise but thorough.`,
       ].join("\n");
 
-      // 3. Process through AI agent with full memory context (force Sonnet)
-      const result = await agent.processMessage("heartbeat", prompt, "sonnet");
-
-      // 4. Send via WhatsApp
-      const message = `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST\n\n${result.response}`;
-
+      // 3. Send via WhatsApp
       if (ALERT_PHONE && whatsapp.isConnected()) {
         await whatsapp.sendMessage(ALERT_PHONE, message);
-        console.log(
-          `[Goldie] ♥ Heartbeat #${heartbeatCount} sent | ` +
-          `${result.tokensIn}+${result.tokensOut} tokens | $${result.cost.toFixed(4)}`
-        );
+        console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} sent`);
       } else {
         console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} (not sent — no phone or disconnected)`);
         console.log(message);
       }
 
-      // 5. Save concise summary to memory for next heartbeat's context
-      try {
-        const signalFirstLine = signalResult.split("\n")[0];
-        await agent.getMemory().saveMemory(
-          `Heartbeat #${heartbeatCount} (${timeStr} GST): ${signalFirstLine} | AI action: ${result.response.slice(0, 150)}`,
-          "task_outcome",
-          { heartbeat: heartbeatCount, time: now.toISOString() }
-        );
-      } catch {
-        // Memory not enabled or save failed — non-fatal
+      // 4. Save summary to memory for AI conversations
+      if (agent.isMemoryEnabled()) {
+        try {
+          const signalFirstLine = signalResult.split("\n")[0];
+          await agent.getMemory().saveMemory(
+            `HB#${heartbeatCount} (${timeStr} GST): ${signalFirstLine}`,
+            "task_outcome",
+            { heartbeat: heartbeatCount, time: now.toISOString() }
+          );
+        } catch {
+          // Non-fatal
+        }
       }
 
       lastHeartbeatTime = now.getTime();

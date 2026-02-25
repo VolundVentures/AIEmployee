@@ -274,21 +274,22 @@ function formatNoSignal(
   const dir = (s: TradingSignal) =>
     s.direction === "BUY" ? "🟢" : s.direction === "SELL" ? "🔴" : "⚪";
 
-  const sourceLabel = source === "twelvedata" ? "spot XAUUSD" : "GC=F futures";
+  const sourceLabel = source === "twelvedata" ? "spot" : "futures";
+  const ind = sig1h.indicators; // use 1h for key levels
 
   return [
-    `⚪ *XAUUSD — NO CLEAR SIGNAL*`,
-    `Price: $${price.toFixed(2)}`,
+    `⚪ *XAUUSD — WAIT* (no confluence)`,
     ``,
-    `${dir(sig15)} 15min: ${sig15.direction} (conf ${sig15.confidence}%)`,
-    `${dir(sig1h)} 1h: ${sig1h.direction} (conf ${sig1h.confidence}%)`,
-    `${dir(sig4h)} 4h: ${sig4h.direction} (conf ${sig4h.confidence}%)`,
+    `${dir(sig15)} 15min: ${sig15.direction} (${sig15.strength}, ${sig15.confidence}%)`,
+    `${dir(sig1h)} 1h: ${sig1h.direction} (${sig1h.strength}, ${sig1h.confidence}%)`,
+    `${dir(sig4h)} 4h: ${sig4h.direction} (${sig4h.strength}, ${sig4h.confidence}%)`,
     ``,
-    `RSI: ${sig15.indicators.rsi14.toFixed(1)} | MACD: ${sig15.indicators.macdHistogram > 0 ? "Bullish" : "Bearish"}`,
-    `Trend: EMA20 ${sig15.indicators.ema20 > sig15.indicators.ema50 ? ">" : "<"} EMA50`,
+    `RSI: ${ind.rsi14.toFixed(1)} | Stoch: ${ind.stochK.toFixed(0)}/${ind.stochD.toFixed(0)}`,
+    `MACD: ${ind.macdHistogram > 0 ? "+" : ""}${ind.macdHistogram.toFixed(2)} | ATR: ${ind.atr14.toFixed(2)}`,
+    `BB: ${ind.bbLower.toFixed(0)} / ${ind.bbMiddle.toFixed(0)} / ${ind.bbUpper.toFixed(0)}`,
+    `S1: $${ind.pivots.s1.toFixed(2)} | R1: $${ind.pivots.r1.toFixed(2)}`,
     ``,
-    `_Timeframes not aligned — waiting for confluence._`,
-    `_Data: ${sourceLabel}_`,
+    `_${sourceLabel} data_`,
   ].join("\n");
 }
 
@@ -305,22 +306,20 @@ function formatSignal(
     strength === "STRONG" ? "⭐⭐⭐" :
     strength === "MODERATE" ? "⭐⭐" : "⭐";
 
-  const sourceLabel = source === "twelvedata" ? "spot XAUUSD" : "GC=F futures";
+  const sourceLabel = source === "twelvedata" ? "spot" : "futures";
+  const ind = s.indicators;
 
   const lines = [
-    `${emoji} *XAUUSD ${s.direction} SIGNAL* ${emoji}`,
-    `${strength} ${stars} | Confidence: ${confidence}%`,
+    `${emoji} *XAUUSD ${s.direction}* — ${strength} ${stars}`,
+    `Confidence: ${confidence}% | R:R ${s.riskRewardRatio.toFixed(2)}`,
     ``,
     `📍 Entry: $${s.entry.toFixed(2)}`,
     `🛑 SL: $${s.stopLoss.toFixed(2)}`,
-    `🎯 TP1: $${s.takeProfit1.toFixed(2)}`,
-    `🎯 TP2: $${s.takeProfit2.toFixed(2)}`,
-    `🎯 TP3: $${s.takeProfit3.toFixed(2)}`,
-    `📊 R:R ${s.riskRewardRatio.toFixed(2)} | TF: ${primary.tf}`,
+    `🎯 TP1: $${s.takeProfit1.toFixed(2)} | TP2: $${s.takeProfit2.toFixed(2)} | TP3: $${s.takeProfit3.toFixed(2)}`,
     ``,
-    `📈 *Why:*`,
   ];
 
+  // Top reasons (max 4)
   const topReasons = s.reasons
     .filter((r) => !r.includes("Insufficient"))
     .slice(0, 4);
@@ -329,10 +328,10 @@ function formatSignal(
   }
 
   lines.push(``);
-  lines.push(`🔄 *Multi-TF:* ${alignment.join(" | ")}`);
+  lines.push(`🔄 ${alignment.join(" | ")}`);
+  lines.push(`RSI: ${ind.rsi14.toFixed(1)} | ATR: ${ind.atr14.toFixed(2)} | S1: $${ind.pivots.s1.toFixed(0)} R1: $${ind.pivots.r1.toFixed(0)}`);
   lines.push(``);
-  lines.push(`⚠️ _Max 1-2% risk per trade. Not financial advice._`);
-  lines.push(`_Data: ${sourceLabel}_`);
+  lines.push(`⚠️ _Max 1-2% risk. Not financial advice. ${sourceLabel} data._`);
 
   return lines.join("\n");
 }
