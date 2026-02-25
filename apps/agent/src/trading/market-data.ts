@@ -226,23 +226,29 @@ function aggregateTo4h(candles1h: Candle[]): Candle[] {
 // --------------- Public API (MarketDataProvider) ---------------
 
 export class MarketDataProvider {
-  private twelveDataKey: string | undefined;
+  private warnedNoKey = false;
 
-  constructor() {
-    this.twelveDataKey = process.env.TWELVE_DATA_API_KEY;
-    if (!this.twelveDataKey) {
+  // Read lazily — NOT in constructor. In ESM, module-level code in tools.ts
+  // runs before dotenv.config() in trading-bot.ts, so process.env is empty
+  // at construction time. Reading it per-call ensures dotenv has loaded.
+  private getApiKey(): string | undefined {
+    const key = process.env.TWELVE_DATA_API_KEY;
+    if (!key && !this.warnedNoKey) {
+      this.warnedNoKey = true;
       console.warn(
         "[MarketData] No TWELVE_DATA_API_KEY set.\n" +
-        "[MarketData] Falling back to Yahoo Finance GC=F (Gold FUTURES — prices ~$20-30 above spot).\n" +
+        "[MarketData] Falling back to Yahoo Finance GC=F (Gold FUTURES — prices may differ from spot).\n" +
         "[MarketData] For accurate spot XAUUSD, get a free key at https://twelvedata.com"
       );
     }
+    return key;
   }
 
   async getQuote(): Promise<MarketSnapshot> {
-    if (this.twelveDataKey) {
+    const apiKey = this.getApiKey();
+    if (apiKey) {
       try {
-        const quote = await fetchTwelveDataQuote(this.twelveDataKey);
+        const quote = await fetchTwelveDataQuote(apiKey);
         console.log(`[MarketData] Quote from Twelve Data (spot): $${quote.price.toFixed(2)}`);
         return quote;
       } catch (err) {
@@ -261,9 +267,10 @@ export class MarketDataProvider {
   }
 
   async getCandles(timeframe: string = "5min", count: number = 100): Promise<CandleData> {
-    if (this.twelveDataKey) {
+    const apiKey = this.getApiKey();
+    if (apiKey) {
       try {
-        const candles = await fetchTwelveDataCandles(this.twelveDataKey, timeframe, count);
+        const candles = await fetchTwelveDataCandles(apiKey, timeframe, count);
         console.log(`[MarketData] ${timeframe} candles from Twelve Data (spot): ${candles.length} valid bars`);
         return { candles, timeframe, symbol: "XAUUSD", source: "twelvedata" };
       } catch (err) {
