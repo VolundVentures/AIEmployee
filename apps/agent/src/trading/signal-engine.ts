@@ -198,7 +198,8 @@ export class SignalEngine {
     // 7. Pivot point proximity
     const distToS1 = Math.abs(currentPrice - pivots.s1);
     const distToR1 = Math.abs(currentPrice - pivots.r1);
-    const atrVal = atr14[last] || 5;
+    // Use ATR value, fallback to 0.15% of price (not a hardcoded dollar amount)
+    const atrVal = atr14[last] || currentPrice * 0.0015;
 
     if (distToS1 < atrVal * 0.5 && currentPrice >= pivots.s1) {
       bullScore++;
@@ -229,7 +230,8 @@ export class SignalEngine {
 
     // ─── Calculate levels ───────────────────────────────────
 
-    const effectiveAtr = isNaN(atrVal) ? 5 : atrVal;
+    // Fallback to 0.15% of price if ATR failed (not a fixed dollar value)
+    const effectiveAtr = isNaN(atrVal) || atrVal <= 0 ? currentPrice * 0.0015 : atrVal;
 
     let entry = currentPrice;
     let stopLoss: number;

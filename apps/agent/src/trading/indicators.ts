@@ -208,18 +208,53 @@ export interface PivotLevels {
 }
 
 export function pivotPoints(candles: Candle[]): PivotLevels {
-  // Use last completed candle for pivot calculation
-  const last = candles[candles.length - 2] || candles[candles.length - 1];
-  const pivot = (last.high + last.low + last.close) / 3;
+  // Use the full previous session's H/L/C for pivot calculation.
+  // For intraday data we aggregate the prior day's candles to get true
+  // daily high/low/close. Falls back to last 24 candles if fewer available.
+  //
+  // This gives realistic S/R levels — a single candle's H/L/C is too tight.
+
+  // Find the last completed "day" boundary (candles before today)
+  const now = candles[candles.length - 1]?.timestamp || Date.now();
+  const todayStart = new Date(now);
+  todayStart.setUTCHours(0, 0, 0, 0);
+  const todayMs = todayStart.getTime();
+
+  // Gather all candles from the previous session (before today's midnight)
+  const prevSession = candles.filter((c) => c.timestamp < todayMs);
+
+  let sessionHigh: number, sessionLow: number, sessionClose: number;
+
+  if (prevSession.length >= 4) {
+    // Full previous session available — use its H/L/C
+    sessionHigh = Math.max(...prevSession.map((c) => c.high));
+    sessionLow = Math.min(...prevSession.map((c) => c.low));
+    sessionClose = prevSession[prevSession.length - 1].close;
+  } else {
+    // Not enough historical candles — use last 24 candles as proxy
+    const lookback = candles.slice(-Math.min(candles.length, 24), -1);
+    if (lookback.length === 0) {
+      const last = candles[candles.length - 1] || { high: 0, low: 0, close: 0 };
+      sessionHigh = last.high;
+      sessionLow = last.low;
+      sessionClose = last.close;
+    } else {
+      sessionHigh = Math.max(...lookback.map((c) => c.high));
+      sessionLow = Math.min(...lookback.map((c) => c.low));
+      sessionClose = lookback[lookback.length - 1].close;
+    }
+  }
+
+  const pivot = (sessionHigh + sessionLow + sessionClose) / 3;
 
   return {
     pivot,
-    r1: 2 * pivot - last.low,
-    r2: pivot + (last.high - last.low),
-    r3: last.high + 2 * (pivot - last.low),
-    s1: 2 * pivot - last.high,
-    s2: pivot - (last.high - last.low),
-    s3: last.low - 2 * (last.high - pivot),
+    r1: 2 * pivot - sessionLow,
+    r2: pivot + (sessionHigh - sessionLow),
+    r3: sessionHigh + 2 * (pivot - sessionLow),
+    s1: 2 * pivot - sessionHigh,
+    s2: pivot - (sessionHigh - sessionLow),
+    s3: sessionLow - 2 * (sessionHigh - pivot),
   };
 }
 

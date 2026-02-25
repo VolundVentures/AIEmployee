@@ -1,12 +1,13 @@
 /**
- * Market data fetcher for XAUUSD (Gold/USD).
- * Uses multiple free data sources with fallback:
- *   1. Twelve Data API (free tier: 800 req/day)
- *   2. Yahoo Finance (unofficial, no key)
- *   3. MetalpriceAPI (free tier)
+ * Market data fetcher for XAUUSD (Gold/USD) — SPOT prices only.
  *
- * TradingView doesn't expose a public API, so we replicate its
- * data by fetching OHLCV candles and computing indicators ourselves.
+ * Uses multiple free data sources with fallback:
+ *   1. Twelve Data API (free tier: 800 req/day) — XAU/USD spot
+ *   2. Yahoo Finance (unofficial, no key) — XAUUSD=X spot
+ *
+ * IMPORTANT: We use XAUUSD=X on Yahoo (spot gold), NOT GC=F (COMEX futures).
+ * Futures trade at a premium to spot due to cost of carry. Using GC=F would
+ * give prices ~$20-30 higher than what MT4/MT5 brokers show for XAUUSD spot.
  */
 
 export interface Candle {
@@ -29,12 +30,14 @@ export interface MarketSnapshot {
   high24h: number;
   low24h: number;
   timestamp: number;
+  source: string;   // which data provider ("twelvedata" | "yahoo")
 }
 
 export interface CandleData {
   candles: Candle[];
   timeframe: string;
   symbol: string;
+  source: string;   // which data provider
 }
 
 // --------------- Twelve Data (primary) ---------------
@@ -83,25 +86,30 @@ async function fetchTwelveDataQuote(apiKey: string): Promise<MarketSnapshot> {
     high24h: parseFloat(data.high || String(price)),
     low24h: parseFloat(data.low || String(price)),
     timestamp: Date.now(),
+    source: "twelvedata",
   };
 }
 
 // --------------- Yahoo Finance (fallback) ---------------
+// Uses XAUUSD=X (spot gold/USD), NOT GC=F (futures).
+
+const YAHOO_SYMBOL = "XAUUSD=X";
+const YAHOO_HEADERS = { "User-Agent": "Mozilla/5.0" };
 
 async function fetchYahooCandles(
   interval: string = "5m",
   range: string = "1d"
 ): Promise<Candle[]> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=${interval}&range=${range}`;
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${YAHOO_SYMBOL}?interval=${interval}&range=${range}`;
+  const res = await fetch(url, { headers: YAHOO_HEADERS });
   const data = (await res.json()) as any;
 
   const result = data.chart?.result?.[0];
   if (!result) throw new Error("Yahoo Finance: no data returned");
 
   const timestamps = result.timestamp as number[];
+  if (!timestamps || timestamps.length === 0) throw new Error("Yahoo Finance: empty timestamps");
+
   const quotes = result.indicators.quote[0];
 
   return timestamps.map((ts: number, i: number) => ({
@@ -115,10 +123,8 @@ async function fetchYahooCandles(
 }
 
 async function fetchYahooQuote(): Promise<MarketSnapshot> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1m&range=1d`;
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0" },
-  });
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${YAHOO_SYMBOL}?interval=1m&range=1d`;
+  const res = await fetch(url, { headers: YAHOO_HEADERS });
   const data = (await res.json()) as any;
 
   const result = data.chart?.result?.[0];
@@ -126,6 +132,8 @@ async function fetchYahooQuote(): Promise<MarketSnapshot> {
 
   const meta = result.meta;
   const price = meta.regularMarketPrice;
+
+  if (!price || price <= 0) throw new Error("Yahoo Finance: invalid price");
 
   return {
     symbol: "XAUUSD",
@@ -138,7 +146,27 @@ async function fetchYahooQuote(): Promise<MarketSnapshot> {
     high24h: meta.regularMarketDayHigh || price,
     low24h: meta.regularMarketDayLow || price,
     timestamp: Date.now(),
+    source: "yahoo",
   };
+}
+
+// --------------- Helper: aggregate 1h candles into 4h ---------------
+
+function aggregateTo4h(candles1h: Candle[]): Candle[] {
+  const result: Candle[] = [];
+  for (let i = 0; i < candles1h.length; i += 4) {
+    const chunk = candles1h.slice(i, i + 4);
+    if (chunk.length === 0) continue;
+    result.push({
+      timestamp: chunk[0].timestamp,
+      open: chunk[0].open,
+      high: Math.max(...chunk.map((c) => c.high)),
+      low: Math.min(...chunk.map((c) => c.low)),
+      close: chunk[chunk.length - 1].close,
+      volume: chunk.reduce((sum, c) => sum + c.volume, 0),
+    });
+  }
+  return result;
 }
 
 // --------------- Public API (MarketDataProvider) ---------------
@@ -148,24 +176,31 @@ export class MarketDataProvider {
 
   constructor() {
     this.twelveDataKey = process.env.TWELVE_DATA_API_KEY;
+    if (!this.twelveDataKey) {
+      console.warn("[MarketData] No TWELVE_DATA_API_KEY — using Yahoo Finance (XAUUSD=X spot) as primary source.");
+    }
   }
 
   /**
-   * Get current XAUUSD quote (price, spread, 24h change).
+   * Get current XAUUSD spot quote (price, spread, 24h change).
    */
   async getQuote(): Promise<MarketSnapshot> {
     // Try Twelve Data first
     if (this.twelveDataKey) {
       try {
-        return await fetchTwelveDataQuote(this.twelveDataKey);
+        const quote = await fetchTwelveDataQuote(this.twelveDataKey);
+        console.log(`[MarketData] Quote from Twelve Data: $${quote.price.toFixed(2)}`);
+        return quote;
       } catch (err) {
-        console.warn("[MarketData] Twelve Data quote failed, falling back:", err);
+        console.warn("[MarketData] Twelve Data quote failed, falling back to Yahoo:", err);
       }
     }
 
-    // Fallback to Yahoo
+    // Fallback to Yahoo (XAUUSD=X spot)
     try {
-      return await fetchYahooQuote();
+      const quote = await fetchYahooQuote();
+      console.log(`[MarketData] Quote from Yahoo (${YAHOO_SYMBOL}): $${quote.price.toFixed(2)}`);
+      return quote;
     } catch (err) {
       console.error("[MarketData] All quote sources failed:", err);
       throw new Error("Unable to fetch XAUUSD quote from any data source");
@@ -178,17 +213,18 @@ export class MarketDataProvider {
    * @param count Number of candles
    */
   async getCandles(timeframe: string = "5min", count: number = 100): Promise<CandleData> {
-    // Try Twelve Data first
+    // Try Twelve Data first (supports all timeframes natively)
     if (this.twelveDataKey) {
       try {
         const candles = await fetchTwelveDataCandles(this.twelveDataKey, timeframe, count);
-        return { candles, timeframe, symbol: "XAUUSD" };
+        console.log(`[MarketData] ${timeframe} candles from Twelve Data: ${candles.length} bars`);
+        return { candles, timeframe, symbol: "XAUUSD", source: "twelvedata" };
       } catch (err) {
-        console.warn("[MarketData] Twelve Data candles failed, falling back:", err);
+        console.warn(`[MarketData] Twelve Data ${timeframe} candles failed, falling back:`, err);
       }
     }
 
-    // Map timeframe to Yahoo format
+    // Yahoo fallback — map timeframes (Yahoo has no 4h interval)
     const yahooIntervalMap: Record<string, string> = {
       "1min": "1m", "5min": "5m", "15min": "15m",
       "1h": "1h", "4h": "1h", "1day": "1d",
@@ -201,11 +237,19 @@ export class MarketDataProvider {
     try {
       const interval = yahooIntervalMap[timeframe] || "5m";
       const range = yahooRangeMap[timeframe] || "5d";
-      const candles = await fetchYahooCandles(interval, range);
-      return { candles: candles.slice(-count), timeframe, symbol: "XAUUSD" };
+      let candles = await fetchYahooCandles(interval, range);
+
+      // Yahoo has no native 4h candles — aggregate from 1h
+      if (timeframe === "4h") {
+        candles = aggregateTo4h(candles);
+      }
+
+      candles = candles.slice(-count);
+      console.log(`[MarketData] ${timeframe} candles from Yahoo (${YAHOO_SYMBOL}): ${candles.length} bars`);
+      return { candles, timeframe, symbol: "XAUUSD", source: "yahoo" };
     } catch (err) {
-      console.error("[MarketData] All candle sources failed:", err);
-      throw new Error("Unable to fetch XAUUSD candles from any data source");
+      console.error(`[MarketData] All ${timeframe} candle sources failed:`, err);
+      throw new Error(`Unable to fetch XAUUSD ${timeframe} candles from any data source`);
     }
   }
 

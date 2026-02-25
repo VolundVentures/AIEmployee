@@ -66,6 +66,7 @@ export async function executeTradingTool(
         `Bid/Ask: $${quote.bid.toFixed(2)}/$${quote.ask.toFixed(2)} (spread $${quote.spread.toFixed(2)})`,
         `24h: ${quote.change24h >= 0 ? "+" : ""}$${quote.change24h.toFixed(2)} (${quote.changePct24h >= 0 ? "+" : ""}${quote.changePct24h.toFixed(2)}%)`,
         `Range: $${quote.low24h.toFixed(2)} – $${quote.high24h.toFixed(2)}`,
+        `_Source: ${quote.source === "twelvedata" ? "Twelve Data (spot)" : "Yahoo Finance (spot)"}_`,
       ].join("\n");
     }
 
@@ -94,6 +95,9 @@ export async function executeTradingTool(
           `${emoji} *${tf}:* ${signal.direction} (${signal.strength}, conf ${signal.confidence}%)`
         );
       }
+
+      lines.push(``);
+      lines.push(`_Data: spot XAUUSD | ${quote.source === "twelvedata" ? "Twelve Data" : "Yahoo Finance"}_`);
 
       return lines.join("\n");
     }
@@ -212,6 +216,7 @@ function formatNoSignal(
     `Trend: EMA20 ${sig15.indicators.ema20 > sig15.indicators.ema50 ? ">" : "<"} EMA50`,
     ``,
     `_Timeframes not aligned — waiting for confluence._`,
+    `_Data: spot XAUUSD_`,
   ].join("\n");
 }
 
@@ -256,6 +261,7 @@ function formatSignal(
   lines.push(`🔄 *Multi-TF:* ${alignment.join(" | ")}`);
   lines.push(``);
   lines.push(`⚠️ _Max 1-2% risk per trade. Not financial advice._`);
+  lines.push(`_Data: spot XAUUSD_`);
 
   return lines.join("\n");
 }
