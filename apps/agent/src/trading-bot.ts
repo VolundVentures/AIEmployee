@@ -2,20 +2,26 @@
  * XAUUSD Trading Signal Bot -- Entry Point
  *
  * This is a standalone bot that:
- *   1. Connects to WhatsApp (QR code scan on first run)
- *   2. Scans XAUUSD every N minutes using technical analysis
- *   3. Sends BUY/SELL signals to your WhatsApp when confluence triggers
+ *   1. Connects to WhatsApp via Twilio
+ *   2. Runs a heartbeat every 15 minutes: full AI-powered analysis with memory
+ *   3. Sends actionable trade signals + market context automatically
  *   4. Also responds to on-demand requests (ask for price, analysis, etc.)
+ *
+ * The heartbeat is the core loop:
+ *   - Fetches multi-TF signal + market overview (raw data, no AI cost)
+ *   - Passes the data through the AI agent (Sonnet) with full memory context
+ *   - AI compares with previous heartbeats, spots trend shifts, gives clear trade action
+ *   - Saves important observations to persistent memory for continuity
+ *   - Sends the analysis via WhatsApp
  *
  * Usage:
  *   ANTHROPIC_API_KEY=... ALERT_PHONE=... npm run trading-bot
  *
  * Environment variables:
- *   ANTHROPIC_API_KEY   -- Claude API key (for AI-enhanced commentary)
- *   TWELVE_DATA_API_KEY -- (optional) Twelve Data API key for better data
- *   ALERT_PHONE         -- Your phone number to receive signals (e.g. 971501234567@s.whatsapp.net)
- *   SCAN_INTERVAL_MINS  -- How often to scan (default: 5)
- *   MIN_CONFIDENCE       -- Minimum confidence % to send alert (default: 40)
+ *   ANTHROPIC_API_KEY       -- Claude API key
+ *   TWELVE_DATA_API_KEY     -- (optional) Twelve Data API key for better data
+ *   ALERT_PHONE             -- Phone to receive signals (e.g. 971501234567@s.whatsapp.net)
+ *   HEARTBEAT_INTERVAL_MINS -- How often to run full analysis (default: 15)
  */
 
 import dotenv from "dotenv";
@@ -31,23 +37,13 @@ dotenv.config();                                                  // cwd fallbac
 
 import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
-import { MarketDataProvider } from "./trading/market-data.js";
-import { SignalEngine } from "./trading/signal-engine.js";
 import { XAUUSD_TRADER } from "./trading/persona.js";
-import { TRADING_TOOLS, executeTradingTool, isTradingTool } from "./trading/tools.js";
-import type { TradingSignal } from "./trading/signal-engine.js";
+import { executeTradingTool } from "./trading/tools.js";
 
 // ─── Config ──────────────────────────────────────────────────────
 
 const ALERT_PHONE = process.env.ALERT_PHONE || "";
-const SCAN_INTERVAL = (parseInt(process.env.SCAN_INTERVAL_MINS || "5", 10)) * 60 * 1000;
-const MIN_CONFIDENCE = parseInt(process.env.MIN_CONFIDENCE || "40", 10);
-
-// ─── State ───────────────────────────────────────────────────────
-
-let lastSignalDirection: string | null = null;
-let lastSignalTime = 0;
-const SIGNAL_COOLDOWN = 15 * 60 * 1000; // Don't repeat same signal within 15 min
+const HEARTBEAT_INTERVAL = (parseInt(process.env.HEARTBEAT_INTERVAL_MINS || "15", 10)) * 60 * 1000;
 
 // ─── Main ────────────────────────────────────────────────────────
 
@@ -56,6 +52,7 @@ async function main() {
     ╔═══════════════════════════════════════════╗
     ║    🥇 GOLDIE -- XAUUSD TRADING BOT 🥇     ║
     ║    AI Employee by Volund Ventures          ║
+    ║    ♥ Heartbeat mode                        ║
     ╚═══════════════════════════════════════════╝
   `);
 
@@ -71,21 +68,21 @@ async function main() {
     process.exit(1);
   }
   if (!ALERT_PHONE) {
-    console.warn("[Goldie] No ALERT_PHONE set. Signals will only be printed to console.");
+    console.warn("[Goldie] No ALERT_PHONE set. Heartbeats will only be printed to console.");
     console.warn("[Goldie] Set ALERT_PHONE=<your-number>@s.whatsapp.net to receive WhatsApp alerts.");
   }
 
   // Initialize
-  const marketData = new MarketDataProvider();
-  const signalEngine = new SignalEngine();
   const agent = new AgentEngine(process.env.ANTHROPIC_API_KEY, XAUUSD_TRADER, "goldie-001");
   const whatsapp = new WhatsAppClient("./baileys_auth_goldie");
 
-  console.log(`[Goldie] Scan interval: ${SCAN_INTERVAL / 60000} minutes`);
-  console.log(`[Goldie] Min confidence: ${MIN_CONFIDENCE}%`);
+  console.log(`[Goldie] Heartbeat interval: ${HEARTBEAT_INTERVAL / 60000} minutes`);
   console.log(`[Goldie] Alert phone: ${ALERT_PHONE || "(none -- console only)"}`);
 
   // ─── Handle incoming WhatsApp messages ─────────────────
+
+  let heartbeatCount = 0;
+  let lastHeartbeatTime = 0;
 
   whatsapp.onMessage(async (jid, text) => {
     try {
@@ -100,7 +97,6 @@ async function main() {
       }
 
       if (lower === "signal" || lower === "s" || lower === "analyze") {
-        // Deep multi-TF signal — runs directly, no AI overhead
         const result = await executeTradingTool("generate_signal", {});
         await whatsapp.sendMessage(jid, result);
         return;
@@ -112,6 +108,13 @@ async function main() {
         return;
       }
 
+      // Manual heartbeat trigger
+      if (lower === "heartbeat" || lower === "hb") {
+        await whatsapp.sendMessage(jid, "♥ Running heartbeat now...");
+        await runHeartbeat();
+        return;
+      }
+
       if (lower === "help" || lower === "h") {
         await whatsapp.sendMessage(jid, [
           `🥇 *Goldie — XAUUSD Bot*`,
@@ -119,8 +122,10 @@ async function main() {
           `*signal* (s) — Deep trading signal`,
           `*price* (p) — Current price`,
           `*overview* (o) — Multi-TF snapshot`,
+          `*heartbeat* (hb) — Run analysis now`,
           `*help* (h) — This message`,
           ``,
+          `♥ Auto-heartbeat every ${HEARTBEAT_INTERVAL / 60000} min`,
           `Or ask me anything about gold!`,
         ].join("\n"));
         return;
@@ -140,95 +145,106 @@ async function main() {
   console.log("[Goldie] Connecting to WhatsApp...");
   await whatsapp.connect();
 
-  // ─── Scheduled market scanner ──────────────────────────
+  // ─── Heartbeat: full AI-powered analysis ───────────────
 
-  async function scanMarket() {
+  async function runHeartbeat() {
     try {
-      console.log(`[Goldie] Scanning XAUUSD...`);
+      heartbeatCount++;
+      const now = new Date();
+      const timeStr = now.toLocaleTimeString("en-US", {
+        timeZone: "Asia/Dubai",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+      const elapsedSinceLast = lastHeartbeatTime
+        ? `${Math.round((now.getTime() - lastHeartbeatTime) / 60000)}min since last`
+        : "first scan";
 
-      // Analyze 15min chart (good balance for intraday signals)
-      const [candleData15, candleData1h, quote] = await Promise.all([
-        marketData.getCandles("15min", 100),
-        marketData.getCandles("1h", 100),
-        marketData.getQuote(),
+      console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} at ${timeStr} GST (${elapsedSinceLast})...`);
+
+      // 1. Fetch market data directly — no AI cost for data gathering
+      const [signalResult, overviewResult] = await Promise.all([
+        executeTradingTool("generate_signal", {}),
+        executeTradingTool("get_market_overview", {}),
       ]);
 
-      const signal15 = signalEngine.analyze(candleData15, quote);
-      const signal1h = signalEngine.analyze(candleData1h, quote);
+      // 2. Build prompt with raw data — AI analyzes with memory context
+      const prompt = [
+        `[HEARTBEAT #${heartbeatCount} — ${timeStr} GST — ${elapsedSinceLast}]`,
+        ``,
+        `Here is the latest market scan. Analyze it using your memory of previous heartbeats.`,
+        ``,
+        `=== SIGNAL ANALYSIS ===`,
+        signalResult,
+        ``,
+        `=== MULTI-TF OVERVIEW ===`,
+        overviewResult,
+        ``,
+        `Your analysis should include:`,
+        `1. What changed since your last heartbeat? Any trend shifts, momentum changes, or key level breaks?`,
+        `2. Clear TRADE ACTION: BUY / SELL / WAIT — include entry, SL, TP if actionable`,
+        `3. Key levels to watch until next heartbeat`,
+        `4. If you spot an important pattern shift or trend change compared to previous scans, save it to memory using save_memory`,
+        ``,
+        `Do NOT call generate_signal or get_market_overview — the data is already above.`,
+        `You may call save_memory if you spot something worth remembering.`,
+        `Format for WhatsApp. Be concise but thorough.`,
+      ].join("\n");
 
-      console.log(
-        `[Goldie] 15min: ${signal15.direction} (${signal15.strength}, conf: ${signal15.confidence}%) | ` +
-        `1h: ${signal1h.direction} (${signal1h.strength}, conf: ${signal1h.confidence}%)`
-      );
+      // 3. Process through AI agent with full memory context (force Sonnet)
+      const result = await agent.processMessage("heartbeat", prompt, "sonnet");
 
-      // Determine if we should alert
-      const shouldAlert = shouldSendAlert(signal15, signal1h);
+      // 4. Send via WhatsApp
+      const message = `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST\n\n${result.response}`;
 
-      if (shouldAlert) {
-        const message = signalEngine.formatSignalMessage(signal15);
-        console.log(`[Goldie] ALERT triggered:\n${message}`);
-
-        if (ALERT_PHONE && whatsapp.isConnected()) {
-          try {
-            await whatsapp.sendMessage(ALERT_PHONE, message);
-            console.log(`[Goldie] Alert sent to ${ALERT_PHONE}`);
-          } catch (err) {
-            console.error("[Goldie] Failed to send WhatsApp alert:", err);
-          }
-        } else if (ALERT_PHONE) {
-          console.warn("[Goldie] WhatsApp not connected -- alert printed to console only.");
-        }
-
-        lastSignalDirection = signal15.direction;
-        lastSignalTime = Date.now();
+      if (ALERT_PHONE && whatsapp.isConnected()) {
+        await whatsapp.sendMessage(ALERT_PHONE, message);
+        console.log(
+          `[Goldie] ♥ Heartbeat #${heartbeatCount} sent | ` +
+          `${result.tokensIn}+${result.tokensOut} tokens | $${result.cost.toFixed(4)}`
+        );
+      } else {
+        console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} (not sent — no phone or disconnected)`);
+        console.log(message);
       }
+
+      // 5. Save concise summary to memory for next heartbeat's context
+      try {
+        const signalFirstLine = signalResult.split("\n")[0];
+        await agent.getMemory().saveMemory(
+          `Heartbeat #${heartbeatCount} (${timeStr} GST): ${signalFirstLine} | AI action: ${result.response.slice(0, 150)}`,
+          "task_outcome",
+          { heartbeat: heartbeatCount, time: now.toISOString() }
+        );
+      } catch {
+        // Memory not enabled or save failed — non-fatal
+      }
+
+      lastHeartbeatTime = now.getTime();
     } catch (err) {
-      console.error("[Goldie] Scan error:", err);
+      console.error("[Goldie] ♥ Heartbeat error:", err);
     }
   }
 
-  // Send a test message to verify Twilio API works
+  // ─── Startup ───────────────────────────────────────────
+
   if (ALERT_PHONE && whatsapp.isConnected()) {
-    console.log("[Goldie] Sending startup test message...");
-    await whatsapp.sendMessage(ALERT_PHONE, "🥇 Goldie is online! Trading bot connected successfully.");
+    console.log("[Goldie] Sending startup message...");
+    await whatsapp.sendMessage(
+      ALERT_PHONE,
+      [
+        `🥇 *Goldie is online!*`,
+        `♥ Heartbeat: every ${HEARTBEAT_INTERVAL / 60000} min`,
+        `Type *help* for commands`,
+      ].join("\n")
+    );
   }
 
-  // Start scanning immediately — scanner checks isConnected() before sending
-  console.log("[Goldie] Starting market scanner...");
-  scanMarket();
-  setInterval(scanMarket, SCAN_INTERVAL);
-}
-
-/**
- * Decide whether a signal should trigger a WhatsApp alert.
- * Requires:
- *   - Signal is BUY or SELL (not HOLD)
- *   - Confidence >= MIN_CONFIDENCE
- *   - Not a repeat of the same signal within cooldown
- *   - Higher timeframe (1h) agrees with the direction
- */
-function shouldSendAlert(signal15: TradingSignal, signal1h: TradingSignal): boolean {
-  // Must be actionable
-  if (signal15.direction === "HOLD") return false;
-
-  // Must meet confidence threshold
-  if (signal15.confidence < MIN_CONFIDENCE) return false;
-
-  // Cooldown: don't repeat same direction within 15 minutes
-  if (
-    signal15.direction === lastSignalDirection &&
-    Date.now() - lastSignalTime < SIGNAL_COOLDOWN
-  ) {
-    return false;
-  }
-
-  // Higher timeframe confirmation: 1h should agree or be neutral
-  if (signal1h.direction !== "HOLD" && signal1h.direction !== signal15.direction) {
-    console.log(`[Goldie] 15min says ${signal15.direction} but 1h says ${signal1h.direction} -- skipping`);
-    return false;
-  }
-
-  return true;
+  // Start heartbeat loop
+  console.log(`[Goldie] Starting heartbeat (every ${HEARTBEAT_INTERVAL / 60000} min)...`);
+  runHeartbeat();
+  setInterval(runHeartbeat, HEARTBEAT_INTERVAL);
 }
 
 // ─── Start ───────────────────────────────────────────────────────
