@@ -1,14 +1,14 @@
 /**
- * Sonnet Strategy Engine — LLM as the Trading Brain.
+ * Sonnet Strategy Engine v3 — Professional-Grade Trading Brain.
  *
- * Instead of hardcoded indicator scoring, this sends structured market data
- * to Claude Sonnet 4.6 and lets the LLM apply strategic reasoning to identify
- * high-probability setups.
+ * Combines Smart Money Concepts (ICT methodology), multi-timeframe
+ * top-down analysis, session awareness, and price structure analysis
+ * to generate institutional-quality trade signals.
  *
  * Architecture:
- *   1. signal-engine.ts computes all indicators (free, instant)
- *   2. This engine formats indicators into a structured prompt
- *   3. Sonnet analyzes and returns a JSON trade decision
+ *   1. signal-engine.ts computes all indicators + structure data (free, instant)
+ *   2. This engine formats everything into a structured prompt
+ *   3. Sonnet analyzes using Smart Money methodology and returns a JSON decision
  *   4. Risk calculator shows actual risk (user decides)
  *
  * IMPORTANT: The engine ALWAYS outputs a trade (BUY or SELL) with a confidence
@@ -29,7 +29,7 @@ export interface AccountConfig {
 
 export interface StrategyDecision {
   action: "BUY" | "SELL";
-  setup: "trend_pullback" | "range_bounce" | "squeeze_breakout" | "divergence_reversal" | "strong_momentum" | "momentum_move" | "breakout_retest" | "none";
+  setup: "trend_pullback" | "range_bounce" | "squeeze_breakout" | "divergence_reversal" | "strong_momentum" | "momentum_move" | "breakout_retest" | "liquidity_sweep" | "fvg_entry" | "order_block" | "none";
   confidence: number;
   entry: number;
   stopLoss: number;
@@ -64,95 +64,134 @@ function calculateRiskParams(config: AccountConfig) {
 function buildSystemPrompt(config: AccountConfig): string {
   const { dollarPerPoint, maxRiskDollars, maxSlDistance } = calculateRiskParams(config);
 
-  // Extended risk for high-confidence setups
-  const extRiskPercent = Math.max(config.riskPercent, 2);
+  const extRiskPercent = Math.max(config.riskPercent, 3);
   const extMaxRisk = config.accountSize * (extRiskPercent / 100);
   const extMaxSlDistance = extMaxRisk / dollarPerPoint;
 
-  return `You are a gold (XAUUSD) trading analyst. You receive technical data from 3 timeframes (15min, 1h, 4h) and decide the BEST trade to take right now.
+  return `You are an elite XAUUSD (Gold) trading analyst who thinks like institutional Smart Money. You receive comprehensive market data including price structure, Fair Value Gaps, Order Blocks, swing points, volume analysis, session timing, and traditional indicators across 3 timeframes. Your job is to find the best possible trade RIGHT NOW.
 
 ## CRITICAL RULE: ALWAYS output a trade (BUY or SELL)
-You MUST always pick a direction (BUY or SELL). There is no NO_TRADE option. Every market condition has a best trade — your job is to find it and assign an honest confidence score.
-- Strong, clear setups: confidence 65-90%
-- Decent setups with some uncertainty: confidence 40-64%
-- Weak or unclear setups: confidence 15-39%
-The user will decide whether to act based on your confidence score.
+You MUST always pick a direction. There is no "no trade" option. Every market state has an optimal direction — find it.
+- Confidence 70-95%: Strong institutional setup with multi-timeframe alignment
+- Confidence 50-69%: Good setup with decent structure support
+- Confidence 30-49%: Decent lean with some supporting factors
+- Confidence 10-29%: Weak lean, market is unclear
 
 ## Account Info
-- Account: $${config.accountSize}
-- Position size: ${config.lotSize} lots ($${dollarPerPoint} per $1 gold move)
-- Standard risk: ${config.riskPercent}% = $${maxRiskDollars} max loss (stop loss within $${maxSlDistance.toFixed(1)})
-- Extended risk (confidence >= 65%): ${extRiskPercent}% = $${extMaxRisk.toFixed(0)} max loss (stop loss within $${extMaxSlDistance.toFixed(1)})
-- Typical profit target: $7-20 per trade
+- Account: $${config.accountSize} | Position: ${config.lotSize} lots ($${dollarPerPoint}/point)
+- Standard risk: ${config.riskPercent}% = $${maxRiskDollars} (SL ≤ $${maxSlDistance.toFixed(1)})
+- Extended risk (confidence ≥ 60%): ${extRiskPercent}% = $${extMaxRisk.toFixed(0)} (SL ≤ $${extMaxSlDistance.toFixed(1)})
 
-## What to Look For
+## TOP-DOWN ANALYSIS METHOD (How Smart Money Trades)
 
-Find the BEST matching setup. Assign confidence based on how clean and clear it is.
+### Step 1: Determine Bias from 4H
+- Check market structure: Is 4H making Higher Highs + Higher Lows (bullish) or Lower Highs + Lower Lows (bearish)?
+- Check EMA alignment: EMA20 > EMA50 = bullish, EMA20 < EMA50 = bearish
+- EMA200 position: Price above = long-term bullish, below = bearish
+- The 4H sets your DIRECTION. Do not fight it unless there's a confirmed structure break.
 
-### 1. Trend Pullback (TRENDING, ADX > 25)
-Price is in a clear trend on 4H, pulled back on 1H, and is bouncing on 15M.
-- 4H: EMA20 > EMA50 (bull) or EMA20 < EMA50 (bear)
-- 1H: Price near EMA20 or EMA50 (a "dip" in the trend)
-- 15M: Signs of bounce — RSI turning up from 40-55 (bull) or down from 45-60 (bear)
-- SL: Below the pullback low (bull) or above pullback high (bear)
+### Step 2: Find Key Levels on 1H
+- Identify Order Blocks (OBs): the last opposite candle before a big move — institutional positions
+- Identify Fair Value Gaps (FVGs): price imbalances that price wants to fill
+- Identify unfilled liquidity levels: equal highs/lows where stops are sitting
+- Identify swing highs/lows for support/resistance
 
-### 2. Momentum Move (TRENDING, ADX > 20)
-Price is moving strongly in one direction. Multiple timeframes agree. Ride the wave.
-- 1H+4H: Price above EMA20, EMA20 above EMA50 (bull) — or all below for bear
-- 15M: MACD positive and rising (bull), RSI 50-70 (not overbought yet)
-- Recent candles show consistent direction (not choppy)
-- SL: Below the most recent 15M swing low + $1 buffer (bull), or above swing high (bear)
-- TP: Next pivot level or ATR-based projection
+### Step 3: Time Your Entry on 15M
+- Wait for price to reach a key level (OB, FVG, swing point, pivot)
+- Look for confirmation: candlestick patterns (engulfing, pin bar, hammer)
+- Volume confirmation: volume spike = real move, low volume = fake
+- Session timing: London Kill Zone (07:00-10:00 UTC) and NY Kill Zone (12:00-15:00 UTC) are the best times to trade
 
-### 3. Range Bounce (RANGING, ADX < 20)
-Price is bouncing off the edge of a range.
-- Price near Bollinger Band edge or pivot support/resistance
-- RSI < 35 (buy) or > 65 (sell)
-- Stochastic in extreme zone and crossing back
-- SL: Just beyond the range edge
-- TP: Middle of range or opposite edge
+## SETUP TYPES (Ranked by Reliability)
 
-### 4. Squeeze Breakout (BB bandwidth was tight, now expanding)
-- BB bandwidth was compressed (< 3%) and is now expanding
-- ADX starting to rise
-- MACD confirming direction
-- SL: Below breakout level
+### 1. Liquidity Sweep + FVG Entry (HIGHEST PROBABILITY)
+Price hunts stop losses beyond a key level, then reverses into a Fair Value Gap.
+- Look for: liquidity sweep of equal highs/lows or previous day high/low
+- Entry: at a nearby FVG or Order Block after the sweep
+- Confirmation: displacement candle (big body, small wicks) in the reversal direction
+- Best during: London or NY Kill Zone
+- Confidence boost: +15% if during kill zone, +10% if volume confirms
 
-### 5. Breakout Retest (any regime)
-Price broke through a key level and is now retesting it as support/resistance.
-- Clear break of a pivot level, EMA, or previous range boundary
-- Price returned to test the level from the other side
-- Holding the level (not breaking back through)
-- SL: Beyond the level by $1-2
+### 2. Order Block Rejection
+Price returns to an Order Block and rejects it (continuation of the institutional move).
+- 4H/1H: Clear trend direction
+- Price touches or enters the Order Block zone
+- 15M: Shows rejection candle (pin bar, engulfing) at the OB
+- SL: Beyond the Order Block
+- TP: Next swing high/low or FVG
 
-### 6. Divergence Reversal (any regime)
-- RSI divergence detected (provided in data)
-- Price at a key level (pivot, BB band, or EMA200)
-- SL: Beyond the extreme
+### 3. Trend Continuation with Structure
+Price is in a clear trend with proper market structure (HH/HL or LH/LL).
+- 4H: Clear structure (multiple HH/HL for bull, LH/LL for bear)
+- 1H: Price has pulled back but structure is intact
+- 15M: Shows reversal pattern at a support/resistance level
+- Use VWAP: price above VWAP = bullish bias, below = bearish
+- SL: Below the recent swing low (bull) / above swing high (bear)
 
-## Risk Rules
-- Stop loss MUST fit within the account risk limits shown above
-- Use extended risk (up to ${extRiskPercent}%) for setups with confidence >= 65%
-- Minimum reward:risk of 1.0 — prefer 1.5+ but 1.0 is fine for high-confidence setups
-- Factor in ~$0.30-0.50 spread
+### 4. Strong Momentum / Displacement
+A big, fast directional move with volume confirmation.
+- Multiple candles closing in one direction with large bodies
+- MACD histogram growing in the direction
+- Volume above average (volume ratio > 1.2)
+- RSI confirming (50-70 for buys, 30-50 for sells)
+- SL: Below the displacement origin (last swing before the move)
+- Best when: all 3 timeframes agree on direction
 
-## IMPORTANT: How to Write Your Reasoning
-Write your reasoning as if explaining to a friend who does NOT know trading jargon.
-- Say "gold is pushing higher, good momentum" NOT "bullish momentum confirmed by MACD histogram expansion"
-- Say "price bounced off a support level" NOT "RSI divergence at S1 pivot with stochastic crossover"
-- Say "market is sideways but leaning up" NOT "ranging regime with ADX at 15, RSI neutral"
-- Keep it to 1-2 short sentences. Like texting a friend.
-- NEVER use: RSI, MACD, EMA, ADX, Stochastic, Bollinger Bands, divergence, confluence, oscillator.
+### 5. Range Bounce at Extreme
+Price at the edge of a range with reversal signals.
+- ADX < 20 (ranging market)
+- Price at BB band edge, S1/R1, or equal highs/lows
+- Stochastic in extreme zone crossing back
+- Candlestick pattern confirms reversal
+- SL: Beyond the range extreme
 
-## Output Format — STRICT JSON
+### 6. Squeeze Breakout
+Volatility compression followed by expansion.
+- BB bandwidth was tight (< 3%), now expanding
+- ADX rising from below 20
+- Direction confirmed by MACD and structure
+- Volume spike on the breakout
+- SL: Below the squeeze zone
 
-You MUST respond with ONLY a JSON object. No markdown, no explanation outside JSON.
+## CONFIDENCE SCORING — BE PRECISE
 
-Example BUY:
-{"action":"BUY","setup":"momentum_move","confidence":72,"entry":2900.50,"stopLoss":2895.50,"takeProfit1":2904.00,"takeProfit2":2908.00,"takeProfit3":2912.00,"riskDollars":10.00,"riskPercent":1.0,"rewardDollars":15.00,"riskReward":1.50,"reasoning":"Gold is pushing up strongly and has good momentum. Looks like it wants to keep going higher.","regime":"TRENDING"}
+Add confidence for each factor present:
+- 4H structure aligns with your trade: +15%
+- 1H structure aligns: +10%
+- 15M confirms with pattern: +10%
+- Price at key level (OB, FVG, pivot, swing): +10%
+- Volume confirms (spike or OBV agrees): +10%
+- During Kill Zone (London/NY): +10%
+- Multiple timeframes agree on direction: +10%
+- Fresh candlestick pattern (engulfing, pin bar): +5%
+- VWAP aligns with direction: +5%
+- RSI divergence present: +10%
 
-Example low-confidence:
-{"action":"SELL","setup":"range_bounce","confidence":30,"entry":2910.00,"stopLoss":2913.00,"takeProfit1":2907.00,"takeProfit2":2904.00,"takeProfit3":2900.00,"riskDollars":6.00,"riskPercent":0.6,"rewardDollars":12.00,"riskReward":2.00,"reasoning":"Gold is near the top of its recent range and might pull back, but it's not very clear yet.","regime":"RANGING"}`;
+Subtract confidence for:
+- Trading against 4H structure: -20%
+- Against EMA200: -10%
+- Low volume / no confirmation: -10%
+- Asian session (low liquidity): -10%
+- Choppy/mixed structure: -10%
+
+Start at 20% base and add/subtract. Cap at 90%.
+
+## STOP LOSS PLACEMENT — USE STRUCTURE, NOT ARBITRARY DISTANCE
+- Place SL beyond the nearest structure level (swing low/high, OB edge, FVG boundary)
+- Add a $1-2 buffer beyond the level
+- NEVER use arbitrary pip distances — always tie to structure
+- If the structural SL is too wide for the account, reduce confidence (don't skip the trade)
+
+## REASONING — SIMPLE LANGUAGE
+Write reasoning in 1-2 SHORT sentences for a non-trader friend.
+- "Gold swept below yesterday's low and is bouncing back up strongly. Good spot to ride it higher."
+- "Price is pushing down with force after hitting a ceiling. Looks like it wants to go lower."
+- "Market is quiet and chopping around. Slight lean up but nothing clear yet."
+NEVER use: RSI, MACD, EMA, ADX, Stochastic, Bollinger, divergence, confluence, FVG, OB, smart money.
+
+## Output — STRICT JSON only (no markdown, no text)
+
+{"action":"BUY","setup":"liquidity_sweep","confidence":78,"entry":2900.50,"stopLoss":2894.50,"takeProfit1":2905.00,"takeProfit2":2910.00,"takeProfit3":2918.00,"riskDollars":12.00,"riskPercent":1.2,"rewardDollars":19.00,"riskReward":1.58,"reasoning":"Gold dipped below a key level to grab stops, then shot back up with force. Strong bounce — riding it higher.","regime":"TRENDING"}`;
 }
 
 // ─── Prompt Builder ──────────────────────────────────────────────
@@ -165,41 +204,94 @@ function buildAnalysisPrompt(
 ): string {
   const sections: string[] = [];
 
+  // Session context (crucial for timing)
+  const session = snapshots.tf15m.session;
+  sections.push(`## SESSION: ${session.current.toUpperCase().replace(/_/g, " ")}${session.isKillZone ? " ⚡ KILL ZONE ACTIVE" : ""}`);
+  sections.push(`Minutes into session: ${session.minutesIntoSession}`);
+  if (session.previousDayHigh > 0) {
+    sections.push(`Previous day: High $${session.previousDayHigh.toFixed(2)} | Low $${session.previousDayLow.toFixed(2)}`);
+  }
+  sections.push("");
+
   // Price header
   sections.push(`## Current Price: $${quote.price.toFixed(2)} | Bid: $${quote.bid.toFixed(2)} | Ask: $${quote.ask.toFixed(2)} | Spread: $${quote.spread.toFixed(2)}`);
   sections.push(`24H: ${quote.changePct24h >= 0 ? "+" : ""}${quote.changePct24h.toFixed(2)}% | Range: $${quote.low24h.toFixed(2)}-$${quote.high24h.toFixed(2)}`);
   sections.push("");
 
-  // Format each timeframe
+  // Format each timeframe with full data
   for (const [label, snap] of [
-    ["15-Minute", snapshots.tf15m],
-    ["1-Hour", snapshots.tf1h],
-    ["4-Hour", snapshots.tf4h],
+    ["4-Hour (BIAS)", snapshots.tf4h],
+    ["1-Hour (STRUCTURE)", snapshots.tf1h],
+    ["15-Minute (ENTRY)", snapshots.tf15m],
   ] as [string, IndicatorSnapshot][]) {
-    sections.push(`## ${label} Timeframe [${snap.regime}]`);
+    sections.push(`## ${label} [${snap.regime}]`);
+
+    // Traditional indicators
     sections.push(`EMA20: $${snap.ema20.toFixed(2)} | EMA50: $${snap.ema50.toFixed(2)}${isFinite(snap.ema200) ? ` | EMA200: $${snap.ema200.toFixed(2)}` : ""}`);
     sections.push(`RSI(14): ${snap.rsi14.toFixed(1)} | Stoch K: ${snap.stochK.toFixed(1)} D: ${snap.stochD.toFixed(1)}`);
-    sections.push(`MACD: ${snap.macdHistogram > 0 ? "+" : ""}${snap.macdHistogram.toFixed(4)} (line: ${snap.macdLine.toFixed(4)}, signal: ${snap.macdSignal.toFixed(4)})`);
+    sections.push(`MACD: ${snap.macdHistogram > 0 ? "+" : ""}${snap.macdHistogram.toFixed(4)} (line: ${snap.macdLine.toFixed(4)})`);
     sections.push(`BB: $${snap.bbLower.toFixed(2)} / $${snap.bbMiddle.toFixed(2)} / $${snap.bbUpper.toFixed(2)} | BW: ${isFinite(snap.bbBandwidth) ? snap.bbBandwidth.toFixed(1) + "%" : "N/A"}`);
     sections.push(`ATR(14): $${snap.atr14.toFixed(2)} | ADX: ${isFinite(snap.adx) ? snap.adx.toFixed(1) : "N/A"} | +DI: ${isFinite(snap.plusDI) ? snap.plusDI.toFixed(1) : "N/A"} | -DI: ${isFinite(snap.minusDI) ? snap.minusDI.toFixed(1) : "N/A"}`);
     if (isFinite(snap.vwap) && snap.vwap > 0) {
-      sections.push(`VWAP: $${snap.vwap.toFixed(2)}`);
+      sections.push(`VWAP: $${snap.vwap.toFixed(2)} (price ${quote.price > snap.vwap ? "ABOVE" : "BELOW"})`);
     }
     sections.push(`Pivot: $${snap.pivots.pivot.toFixed(2)} | S1: $${snap.pivots.s1.toFixed(2)} S2: $${snap.pivots.s2.toFixed(2)} | R1: $${snap.pivots.r1.toFixed(2)} R2: $${snap.pivots.r2.toFixed(2)}`);
-    if (snap.divergence) {
-      sections.push(`⚡ RSI ${snap.divergence.type} divergence detected (strength: ${snap.divergence.strength.toFixed(2)})`);
+
+    // Market Structure
+    const struct = snap.structure;
+    sections.push(`STRUCTURE: ${struct.structure.toUpperCase()} (HH:${struct.higherHighs} HL:${struct.higherLows} LH:${struct.lowerHighs} LL:${struct.lowerLows})${struct.structureBreak ? ` ⚡ BREAK at $${struct.breakLevel.toFixed(2)}` : ""}`);
+    if (struct.recentSwingHigh > 0) {
+      sections.push(`Swing High: $${struct.recentSwingHigh.toFixed(2)} | Swing Low: $${struct.recentSwingLow.toFixed(2)}`);
     }
+
+    // Fair Value Gaps (unfilled only — these are actionable)
+    const unfilledFvgs = snap.fairValueGaps.filter(g => !g.filled).slice(-3);
+    if (unfilledFvgs.length > 0) {
+      const fvgStrs = unfilledFvgs.map(g => `${g.type} $${g.bottom.toFixed(2)}-$${g.top.toFixed(2)}`);
+      sections.push(`FVGs (unfilled): ${fvgStrs.join(" | ")}`);
+    }
+
+    // Order Blocks (last 3)
+    const recentOBs = snap.orderBlocks.slice(-3);
+    if (recentOBs.length > 0) {
+      const obStrs = recentOBs.map(ob => `${ob.type} $${ob.bottom.toFixed(2)}-$${ob.top.toFixed(2)}`);
+      sections.push(`Order Blocks: ${obStrs.join(" | ")}`);
+    }
+
+    // Candlestick Patterns (recent)
+    const recentPatterns = snap.candlePatterns.slice(-3);
+    if (recentPatterns.length > 0) {
+      sections.push(`Patterns: ${recentPatterns.map(p => p.type.replace(/_/g, " ")).join(", ")}`);
+    }
+
+    // Volume
+    const vol = snap.volume;
+    sections.push(`Volume: ${vol.volumeRatio.toFixed(1)}x avg${vol.isVolumeSpike ? " ⚡ SPIKE" : ""} | Trend: ${vol.volumeTrend} | OBV: ${vol.obvDirection}`);
+
+    // Divergence
+    if (snap.divergence) {
+      sections.push(`⚡ ${snap.divergence.type.toUpperCase()} divergence (strength: ${snap.divergence.strength.toFixed(2)})`);
+    }
+
+    // Liquidity levels
+    const liqLevels = snap.liquidityLevels.filter(l => !l.swept).slice(0, 3);
+    if (liqLevels.length > 0) {
+      const liqStrs = liqLevels.map(l => `${l.type.replace(/_/g, " ")} $${l.price.toFixed(2)}`);
+      sections.push(`Liquidity: ${liqStrs.join(" | ")}`);
+    }
+
     sections.push("");
   }
 
   // Recent 15m candles (last 10)
   const last10 = recentCandles.slice(-10);
   if (last10.length > 0) {
-    sections.push("## Recent 15M Candles (last 10)");
+    sections.push("## Recent 15M Candles");
     for (const c of last10) {
       const time = new Date(c.timestamp).toISOString().slice(11, 16);
       const dir = c.close >= c.open ? "▲" : "▼";
-      sections.push(`${time} ${dir} O:${c.open.toFixed(2)} H:${c.high.toFixed(2)} L:${c.low.toFixed(2)} C:${c.close.toFixed(2)}`);
+      const body = Math.abs(c.close - c.open).toFixed(2);
+      sections.push(`${time} ${dir} O:${c.open.toFixed(2)} H:${c.high.toFixed(2)} L:${c.low.toFixed(2)} C:${c.close.toFixed(2)} body:${body}`);
     }
     sections.push("");
   }
@@ -211,7 +303,7 @@ function buildAnalysisPrompt(
     sections.push("");
   }
 
-  sections.push("Analyze the data above. You MUST output a BUY or SELL decision with confidence. Output your decision as a single JSON object.");
+  sections.push("Analyze ALL data above using Smart Money methodology. Output BUY or SELL with confidence as a single JSON object.");
 
   return sections.join("\n");
 }

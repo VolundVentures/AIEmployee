@@ -25,8 +25,14 @@ import type { Candle, CandleData, MarketSnapshot } from "./market-data.js";
 import {
   ema, rsi, macd, bollingerBands, atr,
   stochastic, pivotPoints, vwap, adx, detectDivergence,
+  detectSwingPoints, analyzeStructure, detectFairValueGaps,
+  detectOrderBlocks, detectCandlePatterns, analyzeVolume, detectSession,
+  detectLiquidityLevels,
   type MACDResult, type BollingerBands, type StochasticResult, type PivotLevels,
   type ADXResult, type Divergence,
+  type SwingPoint, type StructureAnalysis, type FairValueGap,
+  type OrderBlock, type CandlePattern, type VolumeAnalysis, type SessionInfo,
+  type LiquidityLevel,
 } from "./indicators.js";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -77,6 +83,15 @@ export interface IndicatorSnapshot {
   bbBandwidth: number;
   regime: MarketRegime;
   divergence: Divergence | null;
+  // v3 additions: Smart Money / Price Structure
+  swingPoints: SwingPoint[];
+  structure: StructureAnalysis;
+  fairValueGaps: FairValueGap[];
+  orderBlocks: OrderBlock[];
+  candlePatterns: CandlePattern[];
+  volume: VolumeAnalysis;
+  session: SessionInfo;
+  liquidityLevels: LiquidityLevel[];
 }
 
 // ─── Regime weight multipliers ──────────────────────────────────
@@ -151,6 +166,18 @@ export class SignalEngine {
 
     const regime = detectRegime(adxResult, bb, last);
 
+    // v3: Smart Money / Structure indicators
+    const swingPts = detectSwingPoints(candles, 2);
+    const structureResult = analyzeStructure(swingPts);
+    const atrVal = atr14[last];
+    const effectiveAtr = isFinite(atrVal) && atrVal > 0 ? atrVal : currentPrice * 0.0015;
+    const fvgs = detectFairValueGaps(candles, 30);
+    const obs = detectOrderBlocks(candles, effectiveAtr, 20);
+    const patterns = detectCandlePatterns(candles, 10);
+    const volumeResult = analyzeVolume(candles, 20);
+    const sessionResult = detectSession(candles);
+    const liquidityLvls = detectLiquidityLevels(swingPts, candles, effectiveAtr * 0.3);
+
     const snapshot: IndicatorSnapshot = {
       price: currentPrice,
       ema20: ema20[last],
@@ -174,6 +201,15 @@ export class SignalEngine {
       bbBandwidth: bb.bandwidth[last] ?? NaN,
       regime,
       divergence: divergenceResult,
+      // v3 Smart Money
+      swingPoints: swingPts,
+      structure: structureResult,
+      fairValueGaps: fvgs,
+      orderBlocks: obs,
+      candlePatterns: patterns,
+      volume: volumeResult,
+      session: sessionResult,
+      liquidityLevels: liquidityLvls,
     };
 
     return { snapshot, candles };
@@ -214,6 +250,18 @@ export class SignalEngine {
 
     const regime = detectRegime(adxResult, bb, last);
 
+    // v3: Smart Money (also in analyze path for fallback)
+    const swingPts = detectSwingPoints(candles, 2);
+    const structureResult = analyzeStructure(swingPts);
+    const atrValue = atr14[last];
+    const effectiveAtrForSM = isFinite(atrValue) && atrValue > 0 ? atrValue : currentPrice * 0.0015;
+    const fvgs = detectFairValueGaps(candles, 30);
+    const obs = detectOrderBlocks(candles, effectiveAtrForSM, 20);
+    const patterns = detectCandlePatterns(candles, 10);
+    const volumeResult = analyzeVolume(candles, 20);
+    const sessionResult = detectSession(candles);
+    const liquidityLvls = detectLiquidityLevels(swingPts, candles, effectiveAtrForSM * 0.3);
+
     const snapshot: IndicatorSnapshot = {
       price: currentPrice,
       ema20: ema20[last],
@@ -237,6 +285,14 @@ export class SignalEngine {
       bbBandwidth: bbBandwidthVal,
       regime,
       divergence: divergenceResult,
+      swingPoints: swingPts,
+      structure: structureResult,
+      fairValueGaps: fvgs,
+      orderBlocks: obs,
+      candlePatterns: patterns,
+      volume: volumeResult,
+      session: sessionResult,
+      liquidityLevels: liquidityLvls,
     };
 
     // ─── Weighted scoring ───────────────────────────────────

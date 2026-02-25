@@ -444,3 +444,507 @@ export function vwap(candles: Candle[]): number[] {
 
   return result;
 }
+
+// ─── Smart Money / Price Structure Indicators ────────────────────
+
+// ─── Swing Points Detection ─────────────────────────────────────
+
+export interface SwingPoint {
+  index: number;
+  price: number;
+  type: "high" | "low";
+  timestamp: number;
+}
+
+/**
+ * Detect swing highs and lows from candle data.
+ * A swing high = candle with higher high than both neighbors.
+ * A swing low = candle with lower low than both neighbors.
+ */
+export function detectSwingPoints(candles: Candle[], lookback: number = 2): SwingPoint[] {
+  const points: SwingPoint[] = [];
+  if (candles.length < lookback * 2 + 1) return points;
+
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    let isSwingHigh = true;
+    let isSwingLow = true;
+
+    for (let j = 1; j <= lookback; j++) {
+      if (candles[i].high <= candles[i - j].high || candles[i].high <= candles[i + j].high) {
+        isSwingHigh = false;
+      }
+      if (candles[i].low >= candles[i - j].low || candles[i].low >= candles[i + j].low) {
+        isSwingLow = false;
+      }
+    }
+
+    if (isSwingHigh) {
+      points.push({ index: i, price: candles[i].high, type: "high", timestamp: candles[i].timestamp });
+    }
+    if (isSwingLow) {
+      points.push({ index: i, price: candles[i].low, type: "low", timestamp: candles[i].timestamp });
+    }
+  }
+
+  return points;
+}
+
+// ─── Market Structure (HH/HL/LH/LL) ────────────────────────────
+
+export type MarketStructure = "bullish" | "bearish" | "neutral";
+
+export interface StructureAnalysis {
+  structure: MarketStructure;
+  recentSwingHigh: number;
+  recentSwingLow: number;
+  higherHighs: number;   // count of HH in recent swings
+  higherLows: number;    // count of HL
+  lowerHighs: number;    // count of LH
+  lowerLows: number;     // count of LL
+  structureBreak: boolean; // whether a break of structure just happened
+  breakLevel: number;     // the level that was broken
+}
+
+/**
+ * Analyze market structure from swing points.
+ * Bullish: Higher Highs + Higher Lows
+ * Bearish: Lower Highs + Lower Lows
+ */
+export function analyzeStructure(swingPoints: SwingPoint[]): StructureAnalysis {
+  const highs = swingPoints.filter(p => p.type === "high");
+  const lows = swingPoints.filter(p => p.type === "low");
+
+  const defaultResult: StructureAnalysis = {
+    structure: "neutral",
+    recentSwingHigh: 0,
+    recentSwingLow: 0,
+    higherHighs: 0,
+    higherLows: 0,
+    lowerHighs: 0,
+    lowerLows: 0,
+    structureBreak: false,
+    breakLevel: 0,
+  };
+
+  if (highs.length < 2 || lows.length < 2) return defaultResult;
+
+  // Count HH/LH and HL/LL in recent swings (last 5 pairs)
+  const recentHighs = highs.slice(-5);
+  const recentLows = lows.slice(-5);
+
+  let hh = 0, lh = 0, hl = 0, ll = 0;
+
+  for (let i = 1; i < recentHighs.length; i++) {
+    if (recentHighs[i].price > recentHighs[i - 1].price) hh++;
+    else lh++;
+  }
+  for (let i = 1; i < recentLows.length; i++) {
+    if (recentLows[i].price > recentLows[i - 1].price) hl++;
+    else ll++;
+  }
+
+  // Determine structure
+  let structure: MarketStructure = "neutral";
+  if (hh >= 2 && hl >= 2) structure = "bullish";
+  else if (lh >= 2 && ll >= 2) structure = "bearish";
+  else if (hh > lh && hl > ll) structure = "bullish";
+  else if (lh > hh && ll > hl) structure = "bearish";
+
+  // Check for break of structure (most recent swing broke previous)
+  const lastHigh = highs[highs.length - 1];
+  const prevHigh = highs[highs.length - 2];
+  const lastLow = lows[lows.length - 1];
+  const prevLow = lows[lows.length - 2];
+
+  let structureBreak = false;
+  let breakLevel = 0;
+
+  // Bearish BOS: price made a lower low (broke below previous swing low)
+  if (lastLow.price < prevLow.price && lastLow.index > prevLow.index) {
+    if (structure === "bearish" || (structure === "neutral" && lh > 0)) {
+      structureBreak = true;
+      breakLevel = prevLow.price;
+    }
+  }
+  // Bullish BOS: price made a higher high (broke above previous swing high)
+  if (lastHigh.price > prevHigh.price && lastHigh.index > prevHigh.index) {
+    if (structure === "bullish" || (structure === "neutral" && hl > 0)) {
+      structureBreak = true;
+      breakLevel = prevHigh.price;
+    }
+  }
+
+  return {
+    structure,
+    recentSwingHigh: lastHigh.price,
+    recentSwingLow: lastLow.price,
+    higherHighs: hh,
+    higherLows: hl,
+    lowerHighs: lh,
+    lowerLows: ll,
+    structureBreak,
+    breakLevel,
+  };
+}
+
+// ─── Fair Value Gaps (FVGs) ─────────────────────────────────────
+
+export interface FairValueGap {
+  type: "bullish" | "bearish";
+  top: number;       // upper boundary of the gap
+  bottom: number;    // lower boundary of the gap
+  index: number;     // candle index of the middle candle
+  filled: boolean;   // whether price has returned to fill it
+  timestamp: number;
+}
+
+/**
+ * Detect Fair Value Gaps in candle data.
+ * Bullish FVG: Gap between candle[i-2].high and candle[i].low (price moved up too fast)
+ * Bearish FVG: Gap between candle[i].high and candle[i-2].low (price moved down too fast)
+ */
+export function detectFairValueGaps(candles: Candle[], lookback: number = 30): FairValueGap[] {
+  const gaps: FairValueGap[] = [];
+  const startIdx = Math.max(2, candles.length - lookback);
+
+  for (let i = startIdx; i < candles.length; i++) {
+    // Bullish FVG: candle[i].low > candle[i-2].high (gap up)
+    if (candles[i].low > candles[i - 2].high) {
+      const gap: FairValueGap = {
+        type: "bullish",
+        top: candles[i].low,
+        bottom: candles[i - 2].high,
+        index: i - 1,
+        filled: false,
+        timestamp: candles[i - 1].timestamp,
+      };
+      // Check if it was filled by subsequent candles
+      for (let j = i + 1; j < candles.length; j++) {
+        if (candles[j].low <= gap.bottom) {
+          gap.filled = true;
+          break;
+        }
+      }
+      gaps.push(gap);
+    }
+
+    // Bearish FVG: candle[i].high < candle[i-2].low (gap down)
+    if (candles[i].high < candles[i - 2].low) {
+      const gap: FairValueGap = {
+        type: "bearish",
+        top: candles[i - 2].low,
+        bottom: candles[i].high,
+        index: i - 1,
+        filled: false,
+        timestamp: candles[i - 1].timestamp,
+      };
+      for (let j = i + 1; j < candles.length; j++) {
+        if (candles[j].high >= gap.top) {
+          gap.filled = true;
+          break;
+        }
+      }
+      gaps.push(gap);
+    }
+  }
+
+  return gaps;
+}
+
+// ─── Order Blocks ───────────────────────────────────────────────
+
+export interface OrderBlock {
+  type: "bullish" | "bearish";
+  top: number;
+  bottom: number;
+  index: number;
+  timestamp: number;
+}
+
+/**
+ * Detect Order Blocks (last opposite candle before a displacement move).
+ * Bullish OB: Last bearish candle before a strong upward move.
+ * Bearish OB: Last bullish candle before a strong downward move.
+ */
+export function detectOrderBlocks(candles: Candle[], atrValue: number, lookback: number = 20): OrderBlock[] {
+  const blocks: OrderBlock[] = [];
+  const startIdx = Math.max(1, candles.length - lookback);
+  const threshold = atrValue * 1.5; // displacement must be > 1.5x ATR
+
+  for (let i = startIdx; i < candles.length - 1; i++) {
+    const curr = candles[i];
+    const next = candles[i + 1];
+    const body = Math.abs(curr.close - curr.open);
+    const nextBody = Math.abs(next.close - next.open);
+
+    // Bullish OB: bearish candle followed by strong bullish displacement
+    if (curr.close < curr.open && next.close > next.open && nextBody > threshold) {
+      blocks.push({
+        type: "bullish",
+        top: curr.open,
+        bottom: curr.low,
+        index: i,
+        timestamp: curr.timestamp,
+      });
+    }
+
+    // Bearish OB: bullish candle followed by strong bearish displacement
+    if (curr.close > curr.open && next.close < next.open && nextBody > threshold) {
+      blocks.push({
+        type: "bearish",
+        top: curr.high,
+        bottom: curr.open,
+        index: i,
+        timestamp: curr.timestamp,
+      });
+    }
+  }
+
+  return blocks;
+}
+
+// ─── Candlestick Patterns ───────────────────────────────────────
+
+export interface CandlePattern {
+  type: "bullish_engulfing" | "bearish_engulfing" | "hammer" | "shooting_star" | "doji" | "pin_bar_bull" | "pin_bar_bear";
+  index: number;
+  timestamp: number;
+}
+
+/**
+ * Detect key candlestick patterns in the most recent candles.
+ */
+export function detectCandlePatterns(candles: Candle[], lookback: number = 10): CandlePattern[] {
+  const patterns: CandlePattern[] = [];
+  const startIdx = Math.max(1, candles.length - lookback);
+
+  for (let i = startIdx; i < candles.length; i++) {
+    const curr = candles[i];
+    const prev = candles[i - 1];
+    const body = Math.abs(curr.close - curr.open);
+    const range = curr.high - curr.low;
+    const upperWick = curr.high - Math.max(curr.open, curr.close);
+    const lowerWick = Math.min(curr.open, curr.close) - curr.low;
+
+    // Bullish engulfing
+    if (prev.close < prev.open && curr.close > curr.open &&
+        curr.open <= prev.close && curr.close >= prev.open) {
+      patterns.push({ type: "bullish_engulfing", index: i, timestamp: curr.timestamp });
+    }
+
+    // Bearish engulfing
+    if (prev.close > prev.open && curr.close < curr.open &&
+        curr.open >= prev.close && curr.close <= prev.open) {
+      patterns.push({ type: "bearish_engulfing", index: i, timestamp: curr.timestamp });
+    }
+
+    if (range > 0) {
+      // Hammer (bullish): small body at top, long lower wick
+      if (lowerWick > body * 2 && upperWick < body * 0.5 && curr.close >= curr.open) {
+        patterns.push({ type: "hammer", index: i, timestamp: curr.timestamp });
+      }
+
+      // Shooting star (bearish): small body at bottom, long upper wick
+      if (upperWick > body * 2 && lowerWick < body * 0.5 && curr.close <= curr.open) {
+        patterns.push({ type: "shooting_star", index: i, timestamp: curr.timestamp });
+      }
+
+      // Pin bar bullish: very long lower wick relative to range
+      if (lowerWick > range * 0.6 && body < range * 0.3) {
+        patterns.push({ type: "pin_bar_bull", index: i, timestamp: curr.timestamp });
+      }
+
+      // Pin bar bearish: very long upper wick relative to range
+      if (upperWick > range * 0.6 && body < range * 0.3) {
+        patterns.push({ type: "pin_bar_bear", index: i, timestamp: curr.timestamp });
+      }
+
+      // Doji: tiny body relative to range
+      if (body < range * 0.1) {
+        patterns.push({ type: "doji", index: i, timestamp: curr.timestamp });
+      }
+    }
+  }
+
+  return patterns;
+}
+
+// ─── Volume Analysis ────────────────────────────────────────────
+
+export interface VolumeAnalysis {
+  avgVolume: number;
+  currentVolume: number;
+  volumeRatio: number;        // current / average (> 1.5 = spike)
+  isVolumeSpike: boolean;
+  volumeTrend: "rising" | "falling" | "flat";
+  obvDirection: "bullish" | "bearish" | "neutral";
+}
+
+/**
+ * Analyze volume patterns: MA, spikes, OBV direction.
+ */
+export function analyzeVolume(candles: Candle[], period: number = 20): VolumeAnalysis {
+  const len = candles.length;
+  if (len < period) {
+    return {
+      avgVolume: 0, currentVolume: 0, volumeRatio: 0,
+      isVolumeSpike: false, volumeTrend: "flat", obvDirection: "neutral",
+    };
+  }
+
+  // Volume MA
+  const recentVolumes = candles.slice(-period).map(c => c.volume);
+  const avgVolume = recentVolumes.reduce((a, b) => a + b, 0) / period;
+  const currentVolume = candles[len - 1].volume;
+  const volumeRatio = avgVolume > 0 ? currentVolume / avgVolume : 0;
+
+  // Volume trend (rising/falling over last 5 candles)
+  const last5 = candles.slice(-5).map(c => c.volume);
+  let risingCount = 0;
+  for (let i = 1; i < last5.length; i++) {
+    if (last5[i] > last5[i - 1]) risingCount++;
+  }
+  const volumeTrend = risingCount >= 3 ? "rising" : risingCount <= 1 ? "falling" : "flat";
+
+  // Simple OBV direction (last 10 candles)
+  let obvSum = 0;
+  const last10 = candles.slice(-10);
+  for (let i = 1; i < last10.length; i++) {
+    if (last10[i].close > last10[i - 1].close) obvSum += last10[i].volume;
+    else if (last10[i].close < last10[i - 1].close) obvSum -= last10[i].volume;
+  }
+  const obvDirection = obvSum > 0 ? "bullish" as const : obvSum < 0 ? "bearish" as const : "neutral" as const;
+
+  return {
+    avgVolume,
+    currentVolume,
+    volumeRatio,
+    isVolumeSpike: volumeRatio > 1.5,
+    volumeTrend,
+    obvDirection,
+  };
+}
+
+// ─── Session Detection ──────────────────────────────────────────
+
+export type TradingSession = "asian" | "london" | "new_york" | "london_ny_overlap" | "off_hours";
+
+export interface SessionInfo {
+  current: TradingSession;
+  isKillZone: boolean;       // London or NY kill zone (highest probability trading)
+  minutesIntoSession: number;
+  sessionOpen: number;       // UTC hour the session started
+  previousDayHigh: number;
+  previousDayLow: number;
+}
+
+/**
+ * Determine the current trading session and kill zone status.
+ * Sessions (UTC):
+ *   Asian:   22:00 - 07:00 UTC (Tokyo/Sydney)
+ *   London:  07:00 - 16:00 UTC
+ *   NY:      12:00 - 21:00 UTC
+ *   Overlap: 12:00 - 16:00 UTC (London + NY)
+ *   Kill Zones: London 07:00-10:00, NY 12:00-15:00 UTC
+ */
+export function detectSession(candles: Candle[]): SessionInfo {
+  const now = new Date();
+  const utcHour = now.getUTCHours();
+  const utcMinute = now.getUTCMinutes();
+
+  let session: TradingSession;
+  let isKillZone = false;
+  let sessionOpen: number;
+
+  if (utcHour >= 12 && utcHour < 16) {
+    session = "london_ny_overlap";
+    sessionOpen = 12;
+    isKillZone = utcHour < 15; // NY kill zone: 12:00-15:00 UTC
+  } else if (utcHour >= 7 && utcHour < 16) {
+    session = "london";
+    sessionOpen = 7;
+    isKillZone = utcHour < 10; // London kill zone: 07:00-10:00 UTC
+  } else if (utcHour >= 12 && utcHour < 21) {
+    session = "new_york";
+    sessionOpen = 12;
+    isKillZone = utcHour < 15;
+  } else if (utcHour >= 22 || utcHour < 7) {
+    session = "asian";
+    sessionOpen = 22;
+    isKillZone = false; // Asian session is setup, not execution
+  } else {
+    session = "off_hours";
+    sessionOpen = utcHour;
+    isKillZone = false;
+  }
+
+  const minutesIntoSession = utcHour >= sessionOpen
+    ? (utcHour - sessionOpen) * 60 + utcMinute
+    : ((24 - sessionOpen) + utcHour) * 60 + utcMinute;
+
+  // Previous day high/low from candle data
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const prevDayCandles = candles.filter(c => c.timestamp >= oneDayAgo);
+  const previousDayHigh = prevDayCandles.length > 0 ? Math.max(...prevDayCandles.map(c => c.high)) : 0;
+  const previousDayLow = prevDayCandles.length > 0 ? Math.min(...prevDayCandles.map(c => c.low)) : 0;
+
+  return {
+    current: session,
+    isKillZone,
+    minutesIntoSession,
+    sessionOpen,
+    previousDayHigh,
+    previousDayLow,
+  };
+}
+
+// ─── Liquidity Levels ───────────────────────────────────────────
+
+export interface LiquidityLevel {
+  price: number;
+  type: "equal_highs" | "equal_lows" | "previous_day_high" | "previous_day_low" | "session_high" | "session_low";
+  swept: boolean;  // whether price has swept this level
+}
+
+/**
+ * Detect liquidity levels (where stop losses accumulate).
+ * Equal highs/lows = areas where multiple swing points cluster.
+ */
+export function detectLiquidityLevels(
+  swingPoints: SwingPoint[],
+  candles: Candle[],
+  tolerance: number = 1.0
+): LiquidityLevel[] {
+  const levels: LiquidityLevel[] = [];
+  const currentPrice = candles.length > 0 ? candles[candles.length - 1].close : 0;
+
+  // Find equal highs (2+ swing highs within tolerance)
+  const highs = swingPoints.filter(p => p.type === "high");
+  for (let i = 0; i < highs.length; i++) {
+    for (let j = i + 1; j < highs.length; j++) {
+      if (Math.abs(highs[i].price - highs[j].price) <= tolerance) {
+        const avgPrice = (highs[i].price + highs[j].price) / 2;
+        const swept = currentPrice > avgPrice;
+        if (!levels.some(l => Math.abs(l.price - avgPrice) < tolerance)) {
+          levels.push({ price: avgPrice, type: "equal_highs", swept });
+        }
+      }
+    }
+  }
+
+  // Find equal lows
+  const lows = swingPoints.filter(p => p.type === "low");
+  for (let i = 0; i < lows.length; i++) {
+    for (let j = i + 1; j < lows.length; j++) {
+      if (Math.abs(lows[i].price - lows[j].price) <= tolerance) {
+        const avgPrice = (lows[i].price + lows[j].price) / 2;
+        const swept = currentPrice < avgPrice;
+        if (!levels.some(l => Math.abs(l.price - avgPrice) < tolerance)) {
+          levels.push({ price: avgPrice, type: "equal_lows", swept });
+        }
+      }
+    }
+  }
+
+  return levels;
+}
