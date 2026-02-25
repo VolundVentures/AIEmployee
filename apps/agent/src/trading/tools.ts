@@ -3,9 +3,8 @@
  * These get merged with the core AGENT_TOOLS when the trading bot runs.
  *
  * Design philosophy — token-efficient, deep analysis:
- *   - `generate_signal` does the heavy lifting: multi-TF confluence, deep
- *     analysis, and pre-formatted WhatsApp-ready output. The AI should call
- *     this ONCE and forward the result — no reformatting needed.
+ *   - `generate_signal` does the heavy lifting: multi-TF analysis via Sonnet
+ *     strategy engine, with fallback to hardcoded signal engine.
  *   - `get_xauusd_price` is kept for quick "what's the price?" queries.
  *   - `get_market_overview` is kept for broad market snapshots.
  *
@@ -19,9 +18,17 @@ import { MarketDataProvider } from "./market-data.js";
 import type { CandleData, MarketSnapshot } from "./market-data.js";
 import { SignalEngine } from "./signal-engine.js";
 import type { TradingSignal, MarketRegime } from "./signal-engine.js";
+import type { StrategyEngine, StrategyDecision } from "./strategy-engine.js";
 
 const marketData = new MarketDataProvider();
 const signalEngine = new SignalEngine();
+
+// Strategy engine is injected from trading-bot.ts (needs API key)
+let strategyEngine: StrategyEngine | null = null;
+
+export function initStrategyEngine(engine: StrategyEngine): void {
+  strategyEngine = engine;
+}
 
 export const TRADING_TOOLS: Anthropic.Tool[] = [
   {
@@ -37,7 +44,7 @@ export const TRADING_TOOLS: Anthropic.Tool[] = [
   {
     name: "generate_signal",
     description:
-      "Generate a deep, high-confidence XAUUSD trading signal. This tool performs multi-timeframe analysis (15min + 1h + 4h), cross-validates confluence across timeframes, and returns a pre-formatted WhatsApp-ready signal message. Call this ONCE — do NOT call other tools alongside it. Forward the result directly to the user without reformatting.",
+      "Generate a deep, high-confidence XAUUSD trading signal. This tool performs multi-timeframe analysis (15min + 1h + 4h) using AI strategy analysis, and returns a pre-formatted WhatsApp-ready signal message. Call this ONCE — do NOT call other tools alongside it. Forward the result directly to the user without reformatting.",
     input_schema: {
       type: "object" as const,
       properties: {},
@@ -93,10 +100,6 @@ export async function executeTradingTool(
 }
 
 // ─── Heartbeat: single batch fetch for all data ───────────────────
-//
-// The heartbeat needs signal + overview. Instead of calling each tool
-// separately (9 API calls, exceeds Twelve Data 8/min limit), we fetch
-// all unique data once (5 calls) and derive both outputs from it.
 
 export interface HeartbeatData {
   quote: MarketSnapshot;
@@ -123,15 +126,14 @@ export async function fetchHeartbeatData(): Promise<HeartbeatData> {
 
 /**
  * Run full heartbeat analysis from pre-fetched data.
- * Returns { signalResult, overviewResult } — no additional API calls.
+ * Uses Sonnet strategy engine if available, falls back to hardcoded signal engine.
+ * Returns { signalResult, overviewResult, strategyCost }.
  */
-export function runHeartbeatAnalysis(data: HeartbeatData): {
+export async function runHeartbeatAnalysis(data: HeartbeatData, memory?: string): Promise<{
   signalResult: string;
   overviewResult: string;
-} {
-  const signalResult = generateDeepSignalFromData(
-    data.candles15min, data.candles1h, data.candles4h, data.quote
-  );
+  strategyCost: number;
+}> {
   const overviewResult = formatOverview(
     {
       "5min": data.candles5min,
@@ -141,7 +143,62 @@ export function runHeartbeatAnalysis(data: HeartbeatData): {
     },
     data.quote
   );
-  return { signalResult, overviewResult };
+
+  // Try Sonnet strategy engine first
+  if (strategyEngine) {
+    try {
+      const result = await runStrategyAnalysis(
+        data.candles15min, data.candles1h, data.candles4h, data.quote, memory
+      );
+      return {
+        signalResult: result.formatted,
+        overviewResult,
+        strategyCost: result.cost,
+      };
+    } catch (err) {
+      console.warn("[Tools] Strategy engine failed, falling back to signal engine:",
+        err instanceof Error ? err.message : err);
+    }
+  }
+
+  // Fallback to hardcoded signal engine
+  const signalResult = generateDeepSignalFromData(
+    data.candles15min, data.candles1h, data.candles4h, data.quote
+  );
+  return { signalResult, overviewResult, strategyCost: 0 };
+}
+
+// ─── Strategy engine integration ────────────────────────────────
+
+async function runStrategyAnalysis(
+  candles15: CandleData,
+  candles1h: CandleData,
+  candles4h: CandleData,
+  quote: MarketSnapshot,
+  memory?: string
+): Promise<{ formatted: string; cost: number }> {
+  if (!strategyEngine) throw new Error("Strategy engine not initialized");
+
+  // Compute indicator snapshots via signal engine (free, instant)
+  const snap15 = signalEngine.computeSnapshot(candles15, quote);
+  const snap1h = signalEngine.computeSnapshot(candles1h, quote);
+  const snap4h = signalEngine.computeSnapshot(candles4h, quote);
+
+  // Call Sonnet for strategy analysis
+  const result = await strategyEngine.analyze(
+    { tf15m: snap15.snapshot, tf1h: snap1h.snapshot, tf4h: snap4h.snapshot },
+    candles15.candles,
+    quote,
+    memory || ""
+  );
+
+  console.log(
+    `[Tools] Strategy: ${result.decision.action} (${result.decision.setup}) | ` +
+    `${result.tokensIn}+${result.tokensOut} tokens | $${result.cost.toFixed(4)}`
+  );
+
+  const formatted = formatStrategyDecision(result.decision, quote);
+  return { formatted, cost: result.cost };
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────
@@ -187,10 +244,48 @@ function formatOverview(
   return lines.join("\n");
 }
 
+/**
+ * Format a Sonnet strategy decision as a WhatsApp message.
+ */
+function formatStrategyDecision(decision: StrategyDecision, quote: MarketSnapshot): string {
+  const sourceLabel = quote.source === "twelvedata" ? "spot" : "futures";
+
+  if (decision.action === "NO_TRADE") {
+    return [
+      `⚪ *XAUUSD — NO TRADE* (${decision.regime})`,
+      ``,
+      `📊 ${decision.reasoning}`,
+      ``,
+      `_${sourceLabel} data | AI strategy analysis_`,
+    ].join("\n");
+  }
+
+  const emoji = decision.action === "BUY" ? "🟢" : "🔴";
+  const setupLabel = decision.setup.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  const stars =
+    decision.confidence >= 75 ? "⭐⭐⭐" :
+    decision.confidence >= 55 ? "⭐⭐" : "⭐";
+
+  return [
+    `${emoji} *XAUUSD ${decision.action}* — ${setupLabel} ${stars} (${decision.regime})`,
+    `Confidence: ${decision.confidence}% | R:R ${decision.riskReward.toFixed(2)}`,
+    ``,
+    `📍 Entry: $${decision.entry.toFixed(2)}`,
+    `🛑 SL: $${decision.stopLoss.toFixed(2)} (Risk: $${decision.riskDollars.toFixed(0)} / ${decision.riskPercent.toFixed(1)}%)`,
+    `🎯 TP1: $${decision.takeProfit1.toFixed(2)} | TP2: $${decision.takeProfit2.toFixed(2)} | TP3: $${decision.takeProfit3.toFixed(2)}`,
+    `💰 Target: $${decision.rewardDollars.toFixed(0)} (TP2)`,
+    ``,
+    `📊 ${decision.reasoning}`,
+    ``,
+    `⚠️ _Max 1-2% risk. Not financial advice. ${sourceLabel} data._`,
+  ].join("\n");
+}
+
 // ─── Deep signal generation ───────────────────────────────────────
 
 /**
  * Generate signal by fetching data (for on-demand queries).
+ * Uses strategy engine if available, otherwise falls back to hardcoded.
  */
 async function generateDeepSignal(): Promise<string> {
   const [candles15, candles1h, candles4h, quote] = await Promise.all([
@@ -199,11 +294,23 @@ async function generateDeepSignal(): Promise<string> {
     marketData.getCandles("4h", 250),   // 250 for EMA200
     marketData.getQuote(),
   ]);
+
+  // Try strategy engine first
+  if (strategyEngine) {
+    try {
+      const result = await runStrategyAnalysis(candles15, candles1h, candles4h, quote);
+      return result.formatted;
+    } catch (err) {
+      console.warn("[Tools] Strategy engine failed on demand, using fallback:",
+        err instanceof Error ? err.message : err);
+    }
+  }
+
   return generateDeepSignalFromData(candles15, candles1h, candles4h, quote);
 }
 
 /**
- * Generate signal from pre-fetched data (for heartbeats — no API calls).
+ * Generate signal from pre-fetched data using hardcoded signal engine (fallback).
  */
 function generateDeepSignalFromData(
   candles15: CandleData,

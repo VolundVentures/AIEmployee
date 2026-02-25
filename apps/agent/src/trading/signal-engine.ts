@@ -124,7 +124,63 @@ const REGIME_WEIGHTS: Record<MarketRegime, Record<string, number>> = {
 
 export class SignalEngine {
   /**
-   * Analyze candle data and generate a trading signal.
+   * Compute all indicators and return the snapshot + candles.
+   * Used by the strategy engine as a data preparation layer.
+   */
+  computeSnapshot(candleData: CandleData, quote?: MarketSnapshot): {
+    snapshot: IndicatorSnapshot;
+    candles: Candle[];
+  } {
+    const { candles } = candleData;
+    const closes = candles.map((c) => c.close);
+    const currentPrice = quote?.price || closes[closes.length - 1];
+    const last = closes.length - 1;
+
+    const ema20 = ema(closes, 20);
+    const ema50 = ema(closes, 50);
+    const ema200Arr = closes.length >= 200 ? ema(closes, 200) : [];
+    const rsi14 = rsi(closes, 14);
+    const macdResult = macd(closes);
+    const bb = bollingerBands(closes);
+    const atr14 = atr(candles);
+    const stoch = stochastic(candles);
+    const pivots = pivotPoints(candles);
+    const adxResult = adx(candles);
+    const vwapArr = vwap(candles);
+    const divergenceResult = detectDivergence(closes, rsi14, 20);
+
+    const regime = detectRegime(adxResult, bb, last);
+
+    const snapshot: IndicatorSnapshot = {
+      price: currentPrice,
+      ema20: ema20[last],
+      ema50: ema50[last],
+      rsi14: rsi14[last],
+      macdLine: macdResult.macd[last],
+      macdSignal: macdResult.signal[last],
+      macdHistogram: macdResult.histogram[last],
+      bbUpper: bb.upper[last],
+      bbMiddle: bb.middle[last],
+      bbLower: bb.lower[last],
+      atr14: atr14[last],
+      stochK: stoch.k[last],
+      stochD: stoch.d[last],
+      pivots,
+      adx: adxResult.adx[last] ?? NaN,
+      plusDI: adxResult.plusDI[last] ?? NaN,
+      minusDI: adxResult.minusDI[last] ?? NaN,
+      ema200: ema200Arr.length > 0 ? ema200Arr[last] : NaN,
+      vwap: vwapArr[last] ?? NaN,
+      bbBandwidth: bb.bandwidth[last] ?? NaN,
+      regime,
+      divergence: divergenceResult,
+    };
+
+    return { snapshot, candles };
+  }
+
+  /**
+   * Analyze candle data and generate a trading signal (hardcoded fallback).
    */
   analyze(candleData: CandleData, quote?: MarketSnapshot): TradingSignal {
     const { candles } = candleData;

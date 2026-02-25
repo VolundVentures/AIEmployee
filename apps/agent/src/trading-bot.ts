@@ -37,7 +37,8 @@ dotenv.config();                                                  // cwd fallbac
 import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
 import { XAUUSD_TRADER } from "./trading/persona.js";
-import { executeTradingTool, fetchHeartbeatData, runHeartbeatAnalysis } from "./trading/tools.js";
+import { executeTradingTool, fetchHeartbeatData, runHeartbeatAnalysis, initStrategyEngine } from "./trading/tools.js";
+import { StrategyEngine } from "./trading/strategy-engine.js";
 
 // ─── Config ──────────────────────────────────────────────────────
 
@@ -75,6 +76,15 @@ async function main() {
   // Use EMPLOYEE_ID from env (must be a valid UUID for memory persistence)
   const agent = new AgentEngine(process.env.ANTHROPIC_API_KEY, XAUUSD_TRADER, process.env.EMPLOYEE_ID);
   const whatsapp = new WhatsAppClient("./baileys_auth_goldie");
+
+  // Initialize Sonnet strategy engine for AI-powered trade decisions
+  const strategyEngineInstance = new StrategyEngine(process.env.ANTHROPIC_API_KEY!, {
+    accountSize: parseInt(process.env.ACCOUNT_SIZE || "1000"),
+    lotSize: parseFloat(process.env.LOT_SIZE || "0.02"),
+    riskPercent: parseFloat(process.env.RISK_PERCENT || "1"),
+  });
+  initStrategyEngine(strategyEngineInstance);
+  console.log(`[Goldie] Strategy engine: Sonnet 4.6 | Account: $${process.env.ACCOUNT_SIZE || "1000"} | Lot: ${process.env.LOT_SIZE || "0.02"} | Risk: ${process.env.RISK_PERCENT || "1"}%`);
 
   console.log(`[Goldie] Heartbeat interval: ${HEARTBEAT_INTERVAL / 60000} minutes`);
   console.log(`[Goldie] Alert phone: ${ALERT_PHONE || "(none -- console only)"}`);
@@ -145,12 +155,12 @@ async function main() {
   console.log("[Goldie] Connecting to WhatsApp...");
   await whatsapp.connect();
 
-  // ─── Heartbeat: signal + AI context ─────────────────────
+  // ─── Heartbeat: Sonnet strategy analysis ────────────────
   //
-  // 1. Signal engine produces the structured signal (no AI cost)
-  // 2. Haiku adds 2-3 sentences of context (cheap, fast)
-  //    — compares with previous heartbeats, spots shifts, notes key levels
-  // 3. Combined message sent via WhatsApp
+  // 1. Fetch market data (5 API calls)
+  // 2. Sonnet strategy engine analyzes indicators + decides trade
+  //    (replaces both hardcoded scoring AND Haiku context steps)
+  // 3. Formatted message sent via WhatsApp
   // 4. Summary saved to memory for continuity
 
   async function runHeartbeat() {
@@ -168,12 +178,24 @@ async function main() {
 
       // 1. Fetch all market data ONCE (5 API calls)
       const hbData = await fetchHeartbeatData();
-      const { signalResult, overviewResult } = runHeartbeatAnalysis(hbData);
 
-      // 2. Build the signal portion of the message
+      // 2. Get memory context for Sonnet (what happened in recent heartbeats)
+      let memoryContext = "";
+      if (agent.isMemoryEnabled()) {
+        try {
+          memoryContext = await agent.getMemory().getContextString() || "";
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      // 3. Run Sonnet strategy analysis (or fallback to signal engine)
+      const { signalResult, strategyCost } = await runHeartbeatAnalysis(hbData, memoryContext);
+
+      // 4. Build message
       const q = hbData.quote;
       const changeSign = q.change24h >= 0 ? "+" : "";
-      const signalMessage = [
+      const message = [
         `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST`,
         `💰 *$${q.price.toFixed(2)}* | ${changeSign}$${q.change24h.toFixed(2)} (${changeSign}${q.changePct24h.toFixed(2)}%)`,
         `Range: $${q.low24h.toFixed(2)} – $${q.high24h.toFixed(2)}`,
@@ -181,37 +203,9 @@ async function main() {
         signalResult,
       ].join("\n");
 
-      // 3. Get AI context (Haiku — fast & cheap)
-      let aiContext = "";
-      try {
-        const aiResult = await agent.processMessage("heartbeat", [
-          `[HEARTBEAT #${heartbeatCount} — ${timeStr} GST]`,
-          ``,
-          `=== SIGNAL ===`,
-          signalResult,
-          ``,
-          `=== MULTI-TF ===`,
-          overviewResult,
-          ``,
-          `Give exactly 2-3 short sentences:`,
-          `1. What changed since last heartbeat? (check your memory)`,
-          `2. Key insight or level to watch`,
-          `Do NOT repeat the signal data. Do NOT use headers or greetings.`,
-          `Plain text only, max 250 chars total.`,
-        ].join("\n"), "haiku");
-
-        if (aiResult.response && aiResult.response.length > 0) {
-          aiContext = `\n💬 _${aiResult.response.trim()}_`;
-          console.log(
-            `[Goldie] ♥ AI context: ${aiResult.tokensIn}+${aiResult.tokensOut} tokens | $${aiResult.cost.toFixed(4)}`
-          );
-        }
-      } catch (err) {
-        console.warn("[Goldie] ♥ AI context failed (non-fatal):", err instanceof Error ? err.message : err);
+      if (strategyCost > 0) {
+        console.log(`[Goldie] ♥ Strategy cost: $${strategyCost.toFixed(4)}`);
       }
-
-      // 4. Combine: signal + AI context
-      const message = signalMessage + aiContext;
 
       // 5. Send via WhatsApp
       if (ALERT_PHONE && whatsapp.isConnected()) {
@@ -222,13 +216,12 @@ async function main() {
         console.log(message);
       }
 
-      // 6. Save summary to memory for AI continuity
+      // 6. Save summary to memory for continuity
       if (agent.isMemoryEnabled()) {
         try {
           const signalFirstLine = signalResult.split("\n")[0];
-          const contextSnippet = aiContext ? ` | ${aiContext.replace(/\n/g, " ").slice(0, 120)}` : "";
           await agent.getMemory().saveMemory(
-            `HB#${heartbeatCount} (${timeStr} GST): ${signalFirstLine}${contextSnippet}`,
+            `HB#${heartbeatCount} (${timeStr} GST): ${signalFirstLine}`,
             "task_outcome",
             { heartbeat: heartbeatCount, time: now.toISOString() }
           );
