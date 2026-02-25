@@ -278,6 +278,156 @@ export function pivotPoints(candles: Candle[]): PivotLevels {
   };
 }
 
+// ─── ADX (Average Directional Index) ────────────────────────────
+
+export interface ADXResult {
+  adx: number[];      // ADX line (0-100, trend strength)
+  plusDI: number[];    // +DI (upward directional indicator)
+  minusDI: number[];  // -DI (downward directional indicator)
+}
+
+export function adx(candles: Candle[], period: number = 14): ADXResult {
+  const len = candles.length;
+  const adxOut: number[] = new Array(len).fill(NaN);
+  const plusDIOut: number[] = new Array(len).fill(NaN);
+  const minusDIOut: number[] = new Array(len).fill(NaN);
+
+  if (len < period * 2) return { adx: adxOut, plusDI: plusDIOut, minusDI: minusDIOut };
+
+  // Step 1: Compute +DM, -DM, and True Range for each bar
+  const plusDM: number[] = [0];
+  const minusDM: number[] = [0];
+  const trueRanges: number[] = [candles[0].high - candles[0].low];
+
+  for (let i = 1; i < len; i++) {
+    const upMove = candles[i].high - candles[i - 1].high;
+    const downMove = candles[i - 1].low - candles[i].low;
+
+    plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+
+    trueRanges.push(Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i - 1].close),
+      Math.abs(candles[i].low - candles[i - 1].close)
+    ));
+  }
+
+  // Step 2: Wilder smooth +DM, -DM, TR over period
+  let smoothPlusDM = 0;
+  let smoothMinusDM = 0;
+  let smoothTR = 0;
+
+  for (let i = 0; i < period; i++) {
+    smoothPlusDM += plusDM[i];
+    smoothMinusDM += minusDM[i];
+    smoothTR += trueRanges[i];
+  }
+
+  // Step 3: Compute +DI, -DI, DX from index (period-1) onward
+  const dxValues: number[] = [];
+
+  for (let i = period - 1; i < len; i++) {
+    if (i > period - 1) {
+      // Wilder smoothing: prev - prev/period + current
+      smoothPlusDM = smoothPlusDM - smoothPlusDM / period + plusDM[i];
+      smoothMinusDM = smoothMinusDM - smoothMinusDM / period + minusDM[i];
+      smoothTR = smoothTR - smoothTR / period + trueRanges[i];
+    }
+
+    const pdi = smoothTR > 0 ? (smoothPlusDM / smoothTR) * 100 : 0;
+    const mdi = smoothTR > 0 ? (smoothMinusDM / smoothTR) * 100 : 0;
+    plusDIOut[i] = pdi;
+    minusDIOut[i] = mdi;
+
+    const diSum = pdi + mdi;
+    const dx = diSum > 0 ? (Math.abs(pdi - mdi) / diSum) * 100 : 0;
+    dxValues.push(dx);
+  }
+
+  // Step 4: ADX = Wilder smooth of DX over period
+  if (dxValues.length >= period) {
+    let adxVal = 0;
+    for (let i = 0; i < period; i++) adxVal += dxValues[i];
+    adxVal /= period;
+    adxOut[period * 2 - 2] = adxVal;
+
+    for (let i = period; i < dxValues.length; i++) {
+      adxVal = (adxVal * (period - 1) + dxValues[i]) / period;
+      adxOut[period - 1 + i] = adxVal;
+    }
+  }
+
+  return { adx: adxOut, plusDI: plusDIOut, minusDI: minusDIOut };
+}
+
+// ─── RSI Divergence Detection ───────────────────────────────────
+
+export interface Divergence {
+  type: "bullish" | "bearish";
+  priceSwing: { index: number; value: number };
+  rsiSwing: { index: number; value: number };
+  strength: number; // 0-1
+}
+
+export function detectDivergence(
+  closes: number[],
+  rsiValues: number[],
+  lookback: number = 20
+): Divergence | null {
+  const len = closes.length;
+  if (len < lookback || lookback < 5) return null;
+
+  const start = len - lookback;
+
+  // Find swing lows (for bullish divergence) and swing highs (for bearish)
+  const swingLows: { index: number; price: number; rsi: number }[] = [];
+  const swingHighs: { index: number; price: number; rsi: number }[] = [];
+
+  for (let i = start + 1; i < len - 1; i++) {
+    if (isNaN(rsiValues[i])) continue;
+
+    if (closes[i] < closes[i - 1] && closes[i] < closes[i + 1]) {
+      swingLows.push({ index: i, price: closes[i], rsi: rsiValues[i] });
+    }
+    if (closes[i] > closes[i - 1] && closes[i] > closes[i + 1]) {
+      swingHighs.push({ index: i, price: closes[i], rsi: rsiValues[i] });
+    }
+  }
+
+  // Bullish divergence: price lower low, RSI higher low
+  if (swingLows.length >= 2) {
+    const prev = swingLows[swingLows.length - 2];
+    const curr = swingLows[swingLows.length - 1];
+    if (curr.price < prev.price && curr.rsi > prev.rsi) {
+      const strength = Math.min(1.0, Math.abs(curr.rsi - prev.rsi) / 20);
+      return {
+        type: "bullish",
+        priceSwing: { index: curr.index, value: curr.price },
+        rsiSwing: { index: curr.index, value: curr.rsi },
+        strength,
+      };
+    }
+  }
+
+  // Bearish divergence: price higher high, RSI lower high
+  if (swingHighs.length >= 2) {
+    const prev = swingHighs[swingHighs.length - 2];
+    const curr = swingHighs[swingHighs.length - 1];
+    if (curr.price > prev.price && curr.rsi < prev.rsi) {
+      const strength = Math.min(1.0, Math.abs(curr.rsi - prev.rsi) / 20);
+      return {
+        type: "bearish",
+        priceSwing: { index: curr.index, value: curr.price },
+        rsiSwing: { index: curr.index, value: curr.rsi },
+        strength,
+      };
+    }
+  }
+
+  return null;
+}
+
 // ─── Volume Weighted Average Price ───────────────────────────────
 
 export function vwap(candles: Candle[]): number[] {

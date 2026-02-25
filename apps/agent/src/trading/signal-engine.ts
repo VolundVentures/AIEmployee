@@ -1,23 +1,32 @@
 /**
- * XAUUSD Trading Signal Engine.
+ * XAUUSD Trading Signal Engine v2.
  *
- * Combines multiple technical indicators to generate BUY/SELL/HOLD signals
- * with entry, stop-loss, and take-profit levels.
+ * Upgrades over v1:
+ *   - ADX-based regime detection (TRENDING / RANGING / BREAKOUT)
+ *   - Regime-adjusted indicator weights (EMAs matter in trends, RSI in ranges)
+ *   - Distance-based weighted scoring (not binary +1/+2)
+ *   - EMA 200 as universal trend filter
+ *   - VWAP as intraday bias (was calculated but unused)
+ *   - BB bandwidth for volatility context (was calculated but unused)
+ *   - RSI divergence detection (strongest reversal signal)
+ *   - Quality gate: minimum weighted score to fire a signal
  *
- * Strategy: Multi-indicator confluence approach
- *   - Trend: EMA 20/50 crossover + MACD direction
- *   - Momentum: RSI extremes + Stochastic crossover
- *   - Volatility: Bollinger Band squeeze/breakout + ATR for SL/TP
+ * Strategy: Multi-indicator confluence with regime awareness
+ *   - Trend: EMA 20/50 crossover + EMA 200 filter + MACD direction
+ *   - Momentum: RSI extremes + Stochastic crossover + RSI divergence
+ *   - Volatility: BB squeeze/breakout + ATR for SL/TP + BB bandwidth
+ *   - Volume: VWAP bias (intraday only)
  *   - Support/Resistance: Pivot points for target levels
  *
- * A signal fires only when >= 3 indicators agree (confluence).
+ * A signal fires only when >= 3 indicators agree AND weighted score >= 2.5.
  */
 
 import type { Candle, CandleData, MarketSnapshot } from "./market-data.js";
 import {
   ema, rsi, macd, bollingerBands, atr,
-  stochastic, pivotPoints, vwap,
+  stochastic, pivotPoints, vwap, adx, detectDivergence,
   type MACDResult, type BollingerBands, type StochasticResult, type PivotLevels,
+  type ADXResult, type Divergence,
 } from "./indicators.js";
 
 // ─── Types ───────────────────────────────────────────────────────
@@ -25,6 +34,7 @@ import {
 export type SignalDirection = "BUY" | "SELL" | "HOLD";
 export type SignalStrength = "STRONG" | "MODERATE" | "WEAK";
 export type SignalTimeframe = "SCALP" | "INTRADAY" | "SWING";
+export type MarketRegime = "TRENDING" | "RANGING" | "BREAKOUT";
 
 export interface TradingSignal {
   direction: SignalDirection;
@@ -58,7 +68,57 @@ export interface IndicatorSnapshot {
   stochK: number;
   stochD: number;
   pivots: PivotLevels;
+  // v2 additions
+  adx: number;
+  plusDI: number;
+  minusDI: number;
+  ema200: number;
+  vwap: number;
+  bbBandwidth: number;
+  regime: MarketRegime;
+  divergence: Divergence | null;
 }
+
+// ─── Regime weight multipliers ──────────────────────────────────
+
+const REGIME_WEIGHTS: Record<MarketRegime, Record<string, number>> = {
+  TRENDING: {
+    emaCrossover: 2.0,
+    priceVsEma: 1.5,
+    rsi: 0.5,
+    macd: 1.5,
+    bbTouch: 0.5,
+    stochastic: 0.5,
+    pivotProximity: 1.0,
+    ema200: 1.0,
+    vwap: 0.8,
+    divergence: 1.0,
+  },
+  RANGING: {
+    emaCrossover: 0.3,
+    priceVsEma: 0.5,
+    rsi: 2.0,
+    macd: 0.5,
+    bbTouch: 2.0,
+    stochastic: 1.5,
+    pivotProximity: 1.5,
+    ema200: 1.0,
+    vwap: 1.0,
+    divergence: 1.5,
+  },
+  BREAKOUT: {
+    emaCrossover: 1.0,
+    priceVsEma: 1.0,
+    rsi: 1.0,
+    macd: 1.5,
+    bbTouch: 2.0,
+    stochastic: 0.5,
+    pivotProximity: 1.0,
+    ema200: 1.0,
+    vwap: 1.0,
+    divergence: 0.5,
+  },
+};
 
 // ─── Signal Engine ───────────────────────────────────────────────
 
@@ -70,18 +130,33 @@ export class SignalEngine {
     const { candles } = candleData;
     const closes = candles.map((c) => c.close);
     const currentPrice = quote?.price || closes[closes.length - 1];
+    const last = closes.length - 1;
 
-    // Calculate all indicators
+    // ─── Calculate all indicators ───────────────────────────
+
     const ema20 = ema(closes, 20);
     const ema50 = ema(closes, 50);
+    const ema200Arr = closes.length >= 200 ? ema(closes, 200) : [];
     const rsi14 = rsi(closes, 14);
     const macdResult = macd(closes);
     const bb = bollingerBands(closes);
     const atr14 = atr(candles);
     const stoch = stochastic(candles);
     const pivots = pivotPoints(candles);
+    const adxResult = adx(candles);
+    const vwapArr = vwap(candles);
+    const divergenceResult = detectDivergence(closes, rsi14, 20);
 
-    const last = closes.length - 1;
+    const ema200Val = ema200Arr.length > 0 ? ema200Arr[last] : NaN;
+    const vwapVal = vwapArr[last] ?? NaN;
+    const adxVal = adxResult.adx[last] ?? NaN;
+    const plusDIVal = adxResult.plusDI[last] ?? NaN;
+    const minusDIVal = adxResult.minusDI[last] ?? NaN;
+    const bbBandwidthVal = bb.bandwidth[last] ?? NaN;
+
+    // ─── Regime detection ───────────────────────────────────
+
+    const regime = detectRegime(adxResult, bb, last);
 
     const snapshot: IndicatorSnapshot = {
       price: currentPrice,
@@ -98,110 +173,169 @@ export class SignalEngine {
       stochK: stoch.k[last],
       stochD: stoch.d[last],
       pivots,
+      adx: adxVal,
+      plusDI: plusDIVal,
+      minusDI: minusDIVal,
+      ema200: ema200Val,
+      vwap: vwapVal,
+      bbBandwidth: bbBandwidthVal,
+      regime,
+      divergence: divergenceResult,
     };
 
-    // ─── Score each indicator ───────────────────────────────
+    // ─── Weighted scoring ───────────────────────────────────
 
+    const weights = REGIME_WEIGHTS[regime];
     let bullScore = 0;
     let bearScore = 0;
+    let rawBullCount = 0;
+    let rawBearCount = 0;
     const reasons: string[] = [];
 
-    // 1. EMA crossover (trend) — guard against NaN
+    // Effective ATR (used throughout)
+    const effectiveAtr = isFinite(atr14[last]) && atr14[last] > 0
+      ? atr14[last] : currentPrice * 0.0015;
+
+    // 1. EMA 20/50 crossover — distance-weighted
     const ema20Last = ema20[last];
     const ema50Last = ema50[last];
     const ema20Prev = ema20[last - 1];
     const ema50Prev = ema50[last - 1];
 
     if (isFinite(ema20Last) && isFinite(ema50Last)) {
+      const emaDistance = Math.abs(ema20Last - ema50Last);
+      const emaWeight = Math.min(1.0, emaDistance / (effectiveAtr * 3));
+      const isFreshCross = isFinite(ema20Prev) && isFinite(ema50Prev);
+
       if (ema20Last > ema50Last) {
-        bullScore++;
-        if (isFinite(ema20Prev) && isFinite(ema50Prev) && ema20Prev <= ema50Prev) {
-          bullScore++; // fresh crossover = extra point
-          reasons.push("EMA 20/50 bullish crossover (fresh)");
-        } else {
-          reasons.push("EMA 20 above EMA 50 (uptrend)");
-        }
+        const bonus = (isFreshCross && ema20Prev <= ema50Prev) ? 0.5 : 0;
+        bullScore += (emaWeight + bonus) * weights.emaCrossover;
+        rawBullCount++;
+        reasons.push(bonus > 0
+          ? "EMA 20/50 bullish crossover (fresh)"
+          : `EMA 20 above EMA 50 (spread: $${emaDistance.toFixed(2)})`);
       } else if (ema20Last < ema50Last) {
-        bearScore++;
-        if (isFinite(ema20Prev) && isFinite(ema50Prev) && ema20Prev >= ema50Prev) {
-          bearScore++;
-          reasons.push("EMA 20/50 bearish crossover (fresh)");
-        } else {
-          reasons.push("EMA 20 below EMA 50 (downtrend)");
-        }
+        const bonus = (isFreshCross && ema20Prev >= ema50Prev) ? 0.5 : 0;
+        bearScore += (emaWeight + bonus) * weights.emaCrossover;
+        rawBearCount++;
+        reasons.push(bonus > 0
+          ? "EMA 20/50 bearish crossover (fresh)"
+          : `EMA 20 below EMA 50 (spread: $${emaDistance.toFixed(2)})`);
       }
     }
 
-    // 2. Price vs EMA (trend confirmation)
+    // 2. Price vs both EMAs — distance-weighted
     if (isFinite(ema20Last) && isFinite(ema50Last)) {
       if (currentPrice > ema20Last && currentPrice > ema50Last) {
-        bullScore++;
+        const dist = Math.min(currentPrice - ema20Last, currentPrice - ema50Last);
+        const w = Math.min(1.0, dist / (effectiveAtr * 2));
+        bullScore += w * weights.priceVsEma;
+        rawBullCount++;
         reasons.push("Price above both EMAs");
       } else if (currentPrice < ema20Last && currentPrice < ema50Last) {
-        bearScore++;
+        const dist = Math.min(ema20Last - currentPrice, ema50Last - currentPrice);
+        const w = Math.min(1.0, dist / (effectiveAtr * 2));
+        bearScore += w * weights.priceVsEma;
+        rawBearCount++;
         reasons.push("Price below both EMAs");
       }
     }
 
-    // 3. RSI
+    // 3. RSI — depth-weighted
     const rsiVal = rsi14[last];
     if (!isNaN(rsiVal)) {
       if (rsiVal < 30) {
-        bullScore += 2;
+        const w = (30 - rsiVal) / 30;
+        bullScore += w * weights.rsi;
+        rawBullCount++;
         reasons.push(`RSI oversold (${rsiVal.toFixed(1)})`);
       } else if (rsiVal < 40) {
-        bullScore++;
+        const w = ((40 - rsiVal) / 40) * 0.5;
+        bullScore += w * weights.rsi;
+        rawBullCount++;
         reasons.push(`RSI approaching oversold (${rsiVal.toFixed(1)})`);
       } else if (rsiVal > 70) {
-        bearScore += 2;
+        const w = (rsiVal - 70) / 30;
+        bearScore += w * weights.rsi;
+        rawBearCount++;
         reasons.push(`RSI overbought (${rsiVal.toFixed(1)})`);
       } else if (rsiVal > 60) {
-        bearScore++;
+        const w = ((rsiVal - 60) / 40) * 0.5;
+        bearScore += w * weights.rsi;
+        rawBearCount++;
         reasons.push(`RSI approaching overbought (${rsiVal.toFixed(1)})`);
       }
     }
 
-    // 4. MACD — guard against NaN
+    // 4. MACD histogram — magnitude-weighted
     const macdHist = macdResult.histogram[last];
+    const macdSig = macdResult.signal[last];
     const macdHistPrev = macdResult.histogram[last - 1];
     if (isFinite(macdHist)) {
+      const macdMag = isFinite(macdSig) && Math.abs(macdSig) > 0
+        ? Math.min(1.0, Math.abs(macdHist) / Math.abs(macdSig) * 2)
+        : Math.min(1.0, Math.abs(macdHist) / (effectiveAtr * 0.1));
+
       if (macdHist > 0) {
-        bullScore++;
-        if (isFinite(macdHistPrev) && macdHistPrev <= 0) {
-          bullScore++;
-          reasons.push("MACD histogram turned positive (bullish momentum)");
-        } else {
-          reasons.push("MACD histogram positive");
-        }
+        const bonus = (isFinite(macdHistPrev) && macdHistPrev <= 0) ? 0.3 : 0;
+        bullScore += (macdMag + bonus) * weights.macd;
+        rawBullCount++;
+        reasons.push(bonus > 0
+          ? "MACD histogram turned positive (bullish momentum)"
+          : "MACD histogram positive");
       } else if (macdHist < 0) {
-        bearScore++;
-        if (isFinite(macdHistPrev) && macdHistPrev >= 0) {
-          bearScore++;
-          reasons.push("MACD histogram turned negative (bearish momentum)");
-        } else {
-          reasons.push("MACD histogram negative");
-        }
+        const bonus = (isFinite(macdHistPrev) && macdHistPrev >= 0) ? 0.3 : 0;
+        bearScore += (macdMag + bonus) * weights.macd;
+        rawBearCount++;
+        reasons.push(bonus > 0
+          ? "MACD histogram turned negative (bearish momentum)"
+          : "MACD histogram negative");
       }
     }
 
-    // 5. Bollinger Bands
-    if (currentPrice <= bb.lower[last] && !isNaN(bb.lower[last])) {
-      bullScore += 2;
-      reasons.push("Price at lower Bollinger Band (potential bounce)");
-    } else if (currentPrice >= bb.upper[last] && !isNaN(bb.upper[last])) {
-      bearScore += 2;
-      reasons.push("Price at upper Bollinger Band (potential rejection)");
+    // 5. Bollinger Bands — distance-weighted
+    if (!isNaN(bb.lower[last]) && !isNaN(bb.upper[last])) {
+      const distFromLower = (currentPrice - bb.lower[last]) / effectiveAtr;
+      const distFromUpper = (bb.upper[last] - currentPrice) / effectiveAtr;
+
+      if (distFromLower <= 0) {
+        // At or below lower band
+        bullScore += 1.0 * weights.bbTouch;
+        rawBullCount++;
+        reasons.push("Price at lower Bollinger Band (potential bounce)");
+      } else if (distFromLower < 1) {
+        const w = 1.0 - distFromLower;
+        bullScore += w * weights.bbTouch;
+        rawBullCount++;
+        reasons.push(`Price near lower BB ($${bb.lower[last].toFixed(2)})`);
+      }
+
+      if (distFromUpper <= 0) {
+        // At or above upper band
+        bearScore += 1.0 * weights.bbTouch;
+        rawBearCount++;
+        reasons.push("Price at upper Bollinger Band (potential rejection)");
+      } else if (distFromUpper < 1) {
+        const w = 1.0 - distFromUpper;
+        bearScore += w * weights.bbTouch;
+        rawBearCount++;
+        reasons.push(`Price near upper BB ($${bb.upper[last].toFixed(2)})`);
+      }
     }
 
-    // 6. Stochastic
+    // 6. Stochastic — depth-weighted
     const stochKVal = stoch.k[last];
     const stochDVal = stoch.d[last];
     if (!isNaN(stochKVal) && !isNaN(stochDVal)) {
       if (stochKVal < 20 && stochKVal > stochDVal) {
-        bullScore++;
+        const w = Math.max(0, (20 - stochKVal) / 20);
+        bullScore += w * weights.stochastic;
+        rawBullCount++;
         reasons.push(`Stochastic bullish crossover in oversold zone (K: ${stochKVal.toFixed(1)})`);
       } else if (stochKVal > 80 && stochKVal < stochDVal) {
-        bearScore++;
+        const w = Math.max(0, (stochKVal - 80) / 20);
+        bearScore += w * weights.stochastic;
+        rawBearCount++;
         reasons.push(`Stochastic bearish crossover in overbought zone (K: ${stochKVal.toFixed(1)})`);
       }
     }
@@ -209,40 +343,86 @@ export class SignalEngine {
     // 7. Pivot point proximity
     const distToS1 = Math.abs(currentPrice - pivots.s1);
     const distToR1 = Math.abs(currentPrice - pivots.r1);
-    // Use ATR value, fallback to 0.15% of price (~$4.35 at $2900)
-    const atrVal = isFinite(atr14[last]) && atr14[last] > 0 ? atr14[last] : currentPrice * 0.0015;
 
-    if (distToS1 < atrVal * 0.5 && currentPrice >= pivots.s1) {
-      bullScore++;
+    if (distToS1 < effectiveAtr * 0.5 && currentPrice >= pivots.s1) {
+      const w = 1.0 - (distToS1 / (effectiveAtr * 0.5));
+      bullScore += w * weights.pivotProximity;
+      rawBullCount++;
       reasons.push(`Price near S1 support ($${pivots.s1.toFixed(2)})`);
     }
-    if (distToR1 < atrVal * 0.5 && currentPrice <= pivots.r1) {
-      bearScore++;
+    if (distToR1 < effectiveAtr * 0.5 && currentPrice <= pivots.r1) {
+      const w = 1.0 - (distToR1 / (effectiveAtr * 0.5));
+      bearScore += w * weights.pivotProximity;
+      rawBearCount++;
       reasons.push(`Price near R1 resistance ($${pivots.r1.toFixed(2)})`);
+    }
+
+    // 8. EMA 200 — trend filter
+    if (isFinite(ema200Val)) {
+      if (currentPrice > ema200Val) {
+        bullScore += 1.0 * weights.ema200;
+        rawBullCount++;
+        reasons.push(`Price above EMA 200 ($${ema200Val.toFixed(2)})`);
+      } else if (currentPrice < ema200Val) {
+        bearScore += 1.0 * weights.ema200;
+        rawBearCount++;
+        reasons.push(`Price below EMA 200 ($${ema200Val.toFixed(2)})`);
+      }
+    }
+
+    // 9. VWAP — intraday bias (only meaningful on sub-4h timeframes)
+    const isIntraday = ["1min", "5min", "15min", "1h"].includes(candleData.timeframe);
+    if (isIntraday && isFinite(vwapVal) && vwapVal > 0) {
+      if (currentPrice > vwapVal) {
+        bullScore += 0.5 * weights.vwap;
+        rawBullCount++;
+        reasons.push(`Price above VWAP ($${vwapVal.toFixed(2)})`);
+      } else if (currentPrice < vwapVal) {
+        bearScore += 0.5 * weights.vwap;
+        rawBearCount++;
+        reasons.push(`Price below VWAP ($${vwapVal.toFixed(2)})`);
+      }
+    }
+
+    // 10. RSI Divergence — high-value reversal signal
+    if (divergenceResult) {
+      const divWeight = divergenceResult.strength * 2.5;
+      if (divergenceResult.type === "bullish") {
+        bullScore += divWeight * weights.divergence;
+        rawBullCount++;
+        reasons.push(`RSI bullish divergence (strength: ${divergenceResult.strength.toFixed(2)})`);
+      } else {
+        bearScore += divWeight * weights.divergence;
+        rawBearCount++;
+        reasons.push(`RSI bearish divergence (strength: ${divergenceResult.strength.toFixed(2)})`);
+      }
     }
 
     // ─── Determine signal ───────────────────────────────────
 
-    const totalSignals = bullScore + bearScore;
     const confluenceThreshold = 3;
     let direction: SignalDirection = "HOLD";
     let confluenceCount = 0;
 
-    if (bullScore >= confluenceThreshold && bullScore > bearScore) {
+    if (rawBullCount >= confluenceThreshold && bullScore > bearScore) {
       direction = "BUY";
-      confluenceCount = bullScore;
-    } else if (bearScore >= confluenceThreshold && bearScore > bullScore) {
+      confluenceCount = rawBullCount;
+    } else if (rawBearCount >= confluenceThreshold && bearScore > bullScore) {
       direction = "SELL";
-      confluenceCount = bearScore;
+      confluenceCount = rawBearCount;
     } else {
-      confluenceCount = Math.max(bullScore, bearScore);
-      reasons.push("Insufficient confluence -- no clear signal");
+      confluenceCount = Math.max(rawBullCount, rawBearCount);
+      reasons.push("Insufficient confluence — no clear signal");
+    }
+
+    // Quality gate: minimum weighted score to fire
+    const winningScore = direction === "BUY" ? bullScore : direction === "SELL" ? bearScore : 0;
+    if (direction !== "HOLD" && winningScore < 2.5) {
+      direction = "HOLD";
+      reasons.push("Signal too weak (weighted score below threshold)");
     }
 
     // ─── Calculate levels ───────────────────────────────────
-
-    // Fallback to 0.15% of price if ATR failed (not a fixed dollar value)
-    const effectiveAtr = isNaN(atrVal) || atrVal <= 0 ? currentPrice * 0.0015 : atrVal;
 
     let entry = currentPrice;
     let stopLoss: number;
@@ -254,7 +434,6 @@ export class SignalEngine {
       tp2 = entry + effectiveAtr * 2.0;
       tp3 = entry + effectiveAtr * 3.0;
 
-      // Align TPs with resistance levels if nearby
       if (Math.abs(pivots.r1 - tp1) < effectiveAtr) tp1 = pivots.r1;
       if (Math.abs(pivots.r2 - tp2) < effectiveAtr) tp2 = pivots.r2;
     } else if (direction === "SELL") {
@@ -263,7 +442,6 @@ export class SignalEngine {
       tp2 = entry - effectiveAtr * 2.0;
       tp3 = entry - effectiveAtr * 3.0;
 
-      // Align TPs with support levels if nearby
       if (Math.abs(pivots.s1 - tp1) < effectiveAtr) tp1 = pivots.s1;
       if (Math.abs(pivots.s2 - tp2) < effectiveAtr) tp2 = pivots.s2;
     } else {
@@ -281,24 +459,52 @@ export class SignalEngine {
 
     let confidence = 0;
     if (direction !== "HOLD") {
-      confidence = Math.min(100, confluenceCount * 15 + (riskRewardRatio > 1.5 ? 15 : 0));
+      // Base: normalized weighted score
+      const maxPossible = Object.values(weights).reduce((a, b) => a + b, 0);
+      confidence = Math.round((winningScore / maxPossible) * 100);
+
+      // R:R bonus
+      if (riskRewardRatio > 2.5) confidence += 15;
+      else if (riskRewardRatio > 2.0) confidence += 10;
+
+      // EMA200 opposition penalty
+      if (isFinite(ema200Val)) {
+        if ((direction === "BUY" && currentPrice < ema200Val) ||
+            (direction === "SELL" && currentPrice > ema200Val)) {
+          confidence -= 15;
+          reasons.push("⚠ Signal opposes EMA 200 trend");
+        }
+      }
+
+      // BB squeeze penalty (low vol = wait for breakout)
+      if (isFinite(bbBandwidthVal) && bbBandwidthVal < 3) {
+        confidence -= 10;
+        reasons.push("BB squeeze detected — breakout pending");
+      }
+
+      confidence = Math.max(0, Math.min(100, confidence));
+    }
+
+    // Final quality gate on confidence
+    if (direction !== "HOLD" && confidence < 45) {
+      direction = "HOLD";
+      reasons.push("Confidence below minimum threshold (45%)");
     }
 
     // ─── Strength ───────────────────────────────────────────
 
     let strength: SignalStrength = "WEAK";
-    if (confluenceCount >= 6) strength = "STRONG";
-    else if (confluenceCount >= 4) strength = "MODERATE";
+    if (confluenceCount >= 6 && confidence >= 70) strength = "STRONG";
+    else if (confluenceCount >= 4 && confidence >= 55) strength = "MODERATE";
 
     // ─── Timeframe suggestion ───────────────────────────────
 
-    let timeframe: SignalTimeframe = "INTRADAY";
     const tfMap: Record<string, SignalTimeframe> = {
       "1min": "SCALP", "5min": "SCALP",
       "15min": "INTRADAY", "1h": "INTRADAY",
       "4h": "SWING", "1day": "SWING",
     };
-    timeframe = tfMap[candleData.timeframe] || "INTRADAY";
+    const timeframe = tfMap[candleData.timeframe] || "INTRADAY";
 
     return {
       direction,
@@ -332,10 +538,11 @@ export class SignalEngine {
 
     if (signal.direction === "HOLD") {
       return [
-        `⚪ *XAUUSD -- NO SIGNAL*`,
+        `⚪ *XAUUSD — NO SIGNAL* (${signal.indicators.regime})`,
         ``,
         `Price: $${signal.entry.toFixed(2)}`,
         `RSI: ${signal.indicators.rsi14?.toFixed(1) || "N/A"}`,
+        `ADX: ${isFinite(signal.indicators.adx) ? signal.indicators.adx.toFixed(1) : "N/A"}`,
         `MACD: ${signal.indicators.macdHistogram > 0 ? "Bullish" : "Bearish"}`,
         `Trend: EMA20 ${signal.indicators.ema20 > signal.indicators.ema50 ? ">" : "<"} EMA50`,
         ``,
@@ -348,7 +555,7 @@ export class SignalEngine {
       `${dirEmoji} *XAUUSD ${signal.direction} SIGNAL* ${dirEmoji}`,
       `Strength: ${signal.strength} ${strengthStars}`,
       `Confidence: ${signal.confidence}%`,
-      `Timeframe: ${signal.timeframe}`,
+      `Timeframe: ${signal.timeframe} | Regime: ${signal.indicators.regime}`,
       ``,
       `📍 *Entry:* $${signal.entry.toFixed(2)}`,
       `🛑 *Stop Loss:* $${signal.stopLoss.toFixed(2)}`,
@@ -369,13 +576,49 @@ export class SignalEngine {
     lines.push(`  RSI(14): ${signal.indicators.rsi14?.toFixed(1) || "N/A"}`);
     lines.push(`  MACD Hist: ${signal.indicators.macdHistogram?.toFixed(4) || "N/A"}`);
     lines.push(`  ATR(14): ${signal.indicators.atr14?.toFixed(2) || "N/A"}`);
+    lines.push(`  ADX: ${isFinite(signal.indicators.adx) ? signal.indicators.adx.toFixed(1) : "N/A"}`);
     lines.push(`  BB: ${signal.indicators.bbLower?.toFixed(2)} / ${signal.indicators.bbMiddle?.toFixed(2)} / ${signal.indicators.bbUpper?.toFixed(2)}`);
+    if (isFinite(signal.indicators.ema200)) {
+      lines.push(`  EMA200: $${signal.indicators.ema200.toFixed(2)}`);
+    }
     lines.push(``);
     lines.push(`⚠️ _Risk management: Never risk more than 1-2% of your account per trade._`);
     lines.push(`⏰ ${new Date(signal.timestamp).toUTCString()}`);
 
     return lines.join("\n");
   }
+}
+
+// ─── Regime detection ────────────────────────────────────────────
+
+function detectRegime(
+  adxResult: ADXResult,
+  bb: BollingerBands,
+  last: number
+): MarketRegime {
+  const adxVal = adxResult.adx[last];
+
+  // Not enough data for ADX — default to RANGING (conservative)
+  if (!isFinite(adxVal)) return "RANGING";
+
+  if (adxVal > 25) return "TRENDING";
+
+  if (adxVal < 20) {
+    // Check for breakout: ADX rising from low level + BB was squeezed
+    const adxRising =
+      isFinite(adxResult.adx[last - 1]) && isFinite(adxResult.adx[last - 2]) &&
+      adxResult.adx[last] > adxResult.adx[last - 1] &&
+      adxResult.adx[last - 1] > adxResult.adx[last - 2];
+
+    const bbWidth = bb.bandwidth[last];
+    const recentSqueeze = isFinite(bbWidth) && bbWidth < 3;
+
+    if (adxRising && recentSqueeze) return "BREAKOUT";
+    return "RANGING";
+  }
+
+  // Transition zone (20-25): default to RANGING
+  return "RANGING";
 }
 
 function round(n: number, decimals: number = 2): number {

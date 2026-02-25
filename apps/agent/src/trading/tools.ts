@@ -18,7 +18,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { MarketDataProvider } from "./market-data.js";
 import type { CandleData, MarketSnapshot } from "./market-data.js";
 import { SignalEngine } from "./signal-engine.js";
-import type { TradingSignal } from "./signal-engine.js";
+import type { TradingSignal, MarketRegime } from "./signal-engine.js";
 
 const marketData = new MarketDataProvider();
 const signalEngine = new SignalEngine();
@@ -114,8 +114,8 @@ export async function fetchHeartbeatData(): Promise<HeartbeatData> {
   const [candles5min, candles15min, candles1h, candles4h, quote] = await Promise.all([
     marketData.getCandles("5min", 100),
     marketData.getCandles("15min", 100),
-    marketData.getCandles("1h", 100),
-    marketData.getCandles("4h", 100),
+    marketData.getCandles("1h", 250),   // 250 for EMA200
+    marketData.getCandles("4h", 250),   // 250 for EMA200
     marketData.getQuote(),
   ]);
   return { quote, candles5min, candles15min, candles1h, candles4h };
@@ -174,8 +174,9 @@ function formatOverview(
     const emoji =
       signal.direction === "BUY" ? "🟢" :
       signal.direction === "SELL" ? "🔴" : "⚪";
+    const regime = signal.indicators.regime;
     lines.push(
-      `${emoji} *${tf}:* ${signal.direction} (${signal.strength}, conf ${signal.confidence}%)`
+      `${emoji} *${tf}:* ${signal.direction} (${signal.strength}, ${signal.confidence}%) [${regime}]`
     );
   }
 
@@ -194,8 +195,8 @@ function formatOverview(
 async function generateDeepSignal(): Promise<string> {
   const [candles15, candles1h, candles4h, quote] = await Promise.all([
     marketData.getCandles("15min", 100),
-    marketData.getCandles("1h", 100),
-    marketData.getCandles("4h", 100),
+    marketData.getCandles("1h", 250),   // 250 for EMA200
+    marketData.getCandles("4h", 250),   // 250 for EMA200
     marketData.getQuote(),
   ]);
   return generateDeepSignalFromData(candles15, candles1h, candles4h, quote);
@@ -276,21 +277,24 @@ function formatNoSignal(
 
   const sourceLabel = source === "twelvedata" ? "spot" : "futures";
   const ind = sig1h.indicators; // use 1h for key levels
+  const regime = sig1h.indicators.regime;
+  const adxStr = isFinite(ind.adx) ? ind.adx.toFixed(1) : "N/A";
 
   return [
-    `⚪ *XAUUSD — WAIT* (no confluence)`,
+    `⚪ *XAUUSD — WAIT* (${regime}, no confluence)`,
     ``,
-    `${dir(sig15)} 15min: ${sig15.direction} (${sig15.strength}, ${sig15.confidence}%)`,
-    `${dir(sig1h)} 1h: ${sig1h.direction} (${sig1h.strength}, ${sig1h.confidence}%)`,
-    `${dir(sig4h)} 4h: ${sig4h.direction} (${sig4h.strength}, ${sig4h.confidence}%)`,
+    `${dir(sig15)} 15min: ${sig15.direction} (${sig15.strength}, ${sig15.confidence}%) [${sig15.indicators.regime}]`,
+    `${dir(sig1h)} 1h: ${sig1h.direction} (${sig1h.strength}, ${sig1h.confidence}%) [${regime}]`,
+    `${dir(sig4h)} 4h: ${sig4h.direction} (${sig4h.strength}, ${sig4h.confidence}%) [${sig4h.indicators.regime}]`,
     ``,
-    `RSI: ${ind.rsi14.toFixed(1)} | Stoch: ${ind.stochK.toFixed(0)}/${ind.stochD.toFixed(0)}`,
+    `ADX: ${adxStr} | RSI: ${ind.rsi14.toFixed(1)} | Stoch: ${ind.stochK.toFixed(0)}/${ind.stochD.toFixed(0)}`,
     `MACD: ${ind.macdHistogram > 0 ? "+" : ""}${ind.macdHistogram.toFixed(2)} | ATR: ${ind.atr14.toFixed(2)}`,
-    `BB: ${ind.bbLower.toFixed(0)} / ${ind.bbMiddle.toFixed(0)} / ${ind.bbUpper.toFixed(0)}`,
+    `BB: ${ind.bbLower.toFixed(0)} / ${ind.bbMiddle.toFixed(0)} / ${ind.bbUpper.toFixed(0)} (BW: ${isFinite(ind.bbBandwidth) ? ind.bbBandwidth.toFixed(1) + "%" : "N/A"})`,
     `S1: $${ind.pivots.s1.toFixed(2)} | R1: $${ind.pivots.r1.toFixed(2)}`,
+    ind.divergence ? `⚡ RSI ${ind.divergence.type} divergence (${ind.divergence.strength.toFixed(2)})` : "",
     ``,
     `_${sourceLabel} data_`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function formatSignal(
@@ -308,9 +312,11 @@ function formatSignal(
 
   const sourceLabel = source === "twelvedata" ? "spot" : "futures";
   const ind = s.indicators;
+  const regime = ind.regime;
+  const adxStr = isFinite(ind.adx) ? ind.adx.toFixed(1) : "N/A";
 
   const lines = [
-    `${emoji} *XAUUSD ${s.direction}* — ${strength} ${stars}`,
+    `${emoji} *XAUUSD ${s.direction}* — ${strength} ${stars} (${regime})`,
     `Confidence: ${confidence}% | R:R ${s.riskRewardRatio.toFixed(2)}`,
     ``,
     `📍 Entry: $${s.entry.toFixed(2)}`,
@@ -319,17 +325,21 @@ function formatSignal(
     ``,
   ];
 
-  // Top reasons (max 4)
+  // Top reasons (max 5)
   const topReasons = s.reasons
     .filter((r) => !r.includes("Insufficient"))
-    .slice(0, 4);
+    .slice(0, 5);
   for (const reason of topReasons) {
     lines.push(`• ${reason}`);
   }
 
   lines.push(``);
   lines.push(`🔄 ${alignment.join(" | ")}`);
-  lines.push(`RSI: ${ind.rsi14.toFixed(1)} | ATR: ${ind.atr14.toFixed(2)} | S1: $${ind.pivots.s1.toFixed(0)} R1: $${ind.pivots.r1.toFixed(0)}`);
+  lines.push(`ADX: ${adxStr} | RSI: ${ind.rsi14.toFixed(1)} | ATR: ${ind.atr14.toFixed(2)}`);
+  lines.push(`S1: $${ind.pivots.s1.toFixed(0)} R1: $${ind.pivots.r1.toFixed(0)}${isFinite(ind.ema200) ? ` | EMA200: $${ind.ema200.toFixed(0)}` : ""}`);
+  if (ind.divergence) {
+    lines.push(`⚡ RSI ${ind.divergence.type} divergence (${ind.divergence.strength.toFixed(2)})`);
+  }
   lines.push(``);
   lines.push(`⚠️ _Max 1-2% risk. Not financial advice. ${sourceLabel} data._`);
 
