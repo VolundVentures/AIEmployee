@@ -153,6 +153,22 @@ Volatility compression followed by expansion.
 - Volume spike on the breakout
 - SL: Below the squeeze zone
 
+## PREMIUM / DISCOUNT ZONES — CRITICAL
+Calculate the 50% level of the current 4H swing range (recent swing high to swing low):
+- **Discount zone** (below 50%): Only look for BUYS here
+- **Premium zone** (above 50%): Only look for SELLS here
+- Trading in the wrong zone = low probability. Reduce confidence by 15% if you must.
+
+## THE AMD CYCLE (Session-Based)
+Gold follows this cycle most days:
+1. **Accumulation (Asian session)**: Price builds a tight range. Note the high and low.
+2. **Manipulation (London open)**: Price sweeps one side of the Asian range — this is the FAKE move / stop hunt.
+3. **Distribution (London-NY)**: After the sweep, price reverses and runs in the REAL direction.
+
+If you're in London session and price just swept the Asian high → look for SELLS.
+If you're in London session and price just swept the Asian low → look for BUYS.
+The previous day high/low data and session info are provided — USE THEM.
+
 ## CONFIDENCE SCORING — BE PRECISE
 
 Add confidence for each factor present:
@@ -166,6 +182,8 @@ Add confidence for each factor present:
 - Fresh candlestick pattern (engulfing, pin bar): +5%
 - VWAP aligns with direction: +5%
 - RSI divergence present: +10%
+- Price in correct zone (buys in discount, sells in premium): +10%
+- AMD cycle aligns (e.g., London sweep → reversal trade): +10%
 
 Subtract confidence for:
 - Trading against 4H structure: -20%
@@ -173,6 +191,7 @@ Subtract confidence for:
 - Low volume / no confirmation: -10%
 - Asian session (low liquidity): -10%
 - Choppy/mixed structure: -10%
+- Price in wrong zone (buying in premium, selling in discount): -15%
 
 Start at 20% base and add/subtract. Cap at 90%.
 
@@ -216,6 +235,15 @@ function buildAnalysisPrompt(
   // Price header
   sections.push(`## Current Price: $${quote.price.toFixed(2)} | Bid: $${quote.bid.toFixed(2)} | Ask: $${quote.ask.toFixed(2)} | Spread: $${quote.spread.toFixed(2)}`);
   sections.push(`24H: ${quote.changePct24h >= 0 ? "+" : ""}${quote.changePct24h.toFixed(2)}% | Range: $${quote.low24h.toFixed(2)}-$${quote.high24h.toFixed(2)}`);
+
+  // Premium/Discount zone from 4H structure
+  const swingHigh4h = snapshots.tf4h.structure.recentSwingHigh;
+  const swingLow4h = snapshots.tf4h.structure.recentSwingLow;
+  if (swingHigh4h > 0 && swingLow4h > 0) {
+    const equilibrium = (swingHigh4h + swingLow4h) / 2;
+    const zone = quote.price > equilibrium ? "PREMIUM (look for sells)" : "DISCOUNT (look for buys)";
+    sections.push(`4H Range: $${swingLow4h.toFixed(2)} - $${swingHigh4h.toFixed(2)} | 50% = $${equilibrium.toFixed(2)} | Zone: ${zone}`);
+  }
   sections.push("");
 
   // Format each timeframe with full data
