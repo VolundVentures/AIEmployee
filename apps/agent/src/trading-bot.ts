@@ -8,11 +8,10 @@
  *   4. Also responds to on-demand requests (ask for price, analysis, etc.)
  *
  * The heartbeat is the core loop:
- *   - Fetches multi-TF signal + market overview (raw data, no AI cost)
- *   - Passes the data through the AI agent (Sonnet) with full memory context
- *   - AI compares with previous heartbeats, spots trend shifts, gives clear trade action
- *   - Saves important observations to persistent memory for continuity
- *   - Sends the analysis via WhatsApp
+ *   - Signal engine produces structured signal (no AI cost)
+ *   - Haiku adds 2-3 sentences of context (cheap, fast — compares with memory)
+ *   - Combined message sent via WhatsApp
+ *   - Summary saved to memory for continuity across heartbeats
  *
  * Usage:
  *   ANTHROPIC_API_KEY=... ALERT_PHONE=... npm run trading-bot
@@ -146,11 +145,13 @@ async function main() {
   console.log("[Goldie] Connecting to WhatsApp...");
   await whatsapp.connect();
 
-  // ─── Heartbeat: direct signal delivery ─────────────────
+  // ─── Heartbeat: signal + AI context ─────────────────────
   //
-  // Sends the signal engine's formatted output directly via WhatsApp.
-  // No AI rewriting — keeps messages concise and signal-focused.
-  // Saves a summary to memory so the AI can reference it in conversations.
+  // 1. Signal engine produces the structured signal (no AI cost)
+  // 2. Haiku adds 2-3 sentences of context (cheap, fast)
+  //    — compares with previous heartbeats, spots shifts, notes key levels
+  // 3. Combined message sent via WhatsApp
+  // 4. Summary saved to memory for continuity
 
   async function runHeartbeat() {
     try {
@@ -167,12 +168,12 @@ async function main() {
 
       // 1. Fetch all market data ONCE (5 API calls)
       const hbData = await fetchHeartbeatData();
-      const { signalResult } = runHeartbeatAnalysis(hbData);
+      const { signalResult, overviewResult } = runHeartbeatAnalysis(hbData);
 
-      // 2. Build message: header + price context + signal
+      // 2. Build the signal portion of the message
       const q = hbData.quote;
       const changeSign = q.change24h >= 0 ? "+" : "";
-      const message = [
+      const signalMessage = [
         `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST`,
         `💰 *$${q.price.toFixed(2)}* | ${changeSign}$${q.change24h.toFixed(2)} (${changeSign}${q.changePct24h.toFixed(2)}%)`,
         `Range: $${q.low24h.toFixed(2)} – $${q.high24h.toFixed(2)}`,
@@ -180,7 +181,39 @@ async function main() {
         signalResult,
       ].join("\n");
 
-      // 3. Send via WhatsApp
+      // 3. Get AI context (Haiku — fast & cheap)
+      let aiContext = "";
+      try {
+        const aiResult = await agent.processMessage("heartbeat", [
+          `[HEARTBEAT #${heartbeatCount} — ${timeStr} GST]`,
+          ``,
+          `=== SIGNAL ===`,
+          signalResult,
+          ``,
+          `=== MULTI-TF ===`,
+          overviewResult,
+          ``,
+          `Give exactly 2-3 short sentences:`,
+          `1. What changed since last heartbeat? (check your memory)`,
+          `2. Key insight or level to watch`,
+          `Do NOT repeat the signal data. Do NOT use headers or greetings.`,
+          `Plain text only, max 250 chars total.`,
+        ].join("\n"), "haiku");
+
+        if (aiResult.response && aiResult.response.length > 0) {
+          aiContext = `\n💬 _${aiResult.response.trim()}_`;
+          console.log(
+            `[Goldie] ♥ AI context: ${aiResult.tokensIn}+${aiResult.tokensOut} tokens | $${aiResult.cost.toFixed(4)}`
+          );
+        }
+      } catch (err) {
+        console.warn("[Goldie] ♥ AI context failed (non-fatal):", err instanceof Error ? err.message : err);
+      }
+
+      // 4. Combine: signal + AI context
+      const message = signalMessage + aiContext;
+
+      // 5. Send via WhatsApp
       if (ALERT_PHONE && whatsapp.isConnected()) {
         await whatsapp.sendMessage(ALERT_PHONE, message);
         console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} sent`);
@@ -189,12 +222,13 @@ async function main() {
         console.log(message);
       }
 
-      // 4. Save summary to memory for AI conversations
+      // 6. Save summary to memory for AI continuity
       if (agent.isMemoryEnabled()) {
         try {
           const signalFirstLine = signalResult.split("\n")[0];
+          const contextSnippet = aiContext ? ` | ${aiContext.replace(/\n/g, " ").slice(0, 120)}` : "";
           await agent.getMemory().saveMemory(
-            `HB#${heartbeatCount} (${timeStr} GST): ${signalFirstLine}`,
+            `HB#${heartbeatCount} (${timeStr} GST): ${signalFirstLine}${contextSnippet}`,
             "task_outcome",
             { heartbeat: heartbeatCount, time: now.toISOString() }
           );
