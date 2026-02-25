@@ -13,6 +13,17 @@ import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
 import { OnboardingFlow } from "./onboarding/flow.js";
 
+// ─── Global crash protection ──────────────────────────────
+// Without these, a single unhandled rejection (e.g. Twilio SDK error,
+// Anthropic timeout) silently kills the Node process.  The webhook
+// server dies, Twilio can't reach us, and the sandbox "disconnects".
+process.on("uncaughtException", (err) => {
+  console.error("[FATAL] Uncaught exception (process kept alive):", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[FATAL] Unhandled promise rejection (process kept alive):", reason);
+});
+
 /** Track which chats have completed onboarding */
 const onboardedChats = new Set<string>();
 

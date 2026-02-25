@@ -29,11 +29,18 @@ export class WhatsAppClient extends EventEmitter {
   private connected = false;
   private webhookPort: number;
 
+  /**
+   * Track recently-processed Twilio MessageSids so we can deduplicate
+   * retries.  Twilio re-sends the webhook if we don't reply within 15 s
+   * (or if the first attempt hit a network blip).  Without dedup, each
+   * retry triggers a full AI processing pass + an extra reply — which
+   * confuses the sandbox and can cause it to disconnect.
+   */
+  private processedMessages = new Set<string>();
+  private readonly DEDUP_TTL_MS = 5 * 60 * 1000; // keep SIDs for 5 min
+
   constructor(_authDir?: string) {
     super();
-    // _authDir is ignored — Twilio handles auth via API keys, not local files.
-    // Parameter kept for backward compatibility with existing instantiation.
-    // Strip any "whatsapp:" prefix the user may have included — we add it when needed
     const rawNumber = process.env.TWILIO_WHATSAPP_NUMBER || "";
     this.twilioNumber = rawNumber.replace(/^whatsapp:/i, "");
     this.webhookPort = parseInt(process.env.WEBHOOK_PORT || "3001", 10);
@@ -82,12 +89,6 @@ export class WhatsAppClient extends EventEmitter {
   }
 
   /**
-   * Send a WhatsApp message via Twilio.
-   * @param jid  Phone number in JID format (e.g. "971589115381@s.whatsapp.net")
-   *             or plain number (e.g. "971589115381")
-   * @param text Message body
-   */
-  /**
    * Send a WhatsApp message, automatically splitting into chunks if it
    * exceeds Twilio's 1600-character limit for sandbox numbers.
    */
@@ -117,11 +118,28 @@ export class WhatsAppClient extends EventEmitter {
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[WhatsApp] Failed to send message${label}: ${msg}`);
+
+        // Detect sandbox session expiry (Twilio error 63016 / 63007)
+        // and other "not opted in" errors so the user knows to rejoin.
+        const errStr = String(msg).toLowerCase();
+        if (
+          errStr.includes("63016") ||
+          errStr.includes("63007") ||
+          errStr.includes("not opted") ||
+          errStr.includes("freeform") ||
+          errStr.includes("outside the allowed window")
+        ) {
+          console.error(
+            "[WhatsApp] *** SANDBOX SESSION EXPIRED ***\n" +
+            '  The user must re-send "join <keyword>" to the sandbox number\n' +
+            "  to re-activate the 72-hour session window."
+          );
+        }
       }
 
       // Small delay between chunks to preserve ordering
       if (i < chunks.length - 1) {
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise((r) => setTimeout(r, 500));
       }
     }
   }
@@ -168,22 +186,40 @@ export class WhatsAppClient extends EventEmitter {
 
   private startWebhookServer(): Promise<void> {
     return new Promise((resolve) => {
-      const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        // Health check
-        if (req.method === "GET" && req.url === "/") {
-          res.writeHead(200, { "Content-Type": "text/plain" });
-          res.end("WhatsApp webhook is running");
-          return;
-        }
+      const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+        // Wrap in a sync try-catch — the async work is handled inside
+        // with its own error boundaries.  This prevents unhandled promise
+        // rejections from crashing the process.
+        try {
+          // Health check
+          if (req.method === "GET" && req.url === "/") {
+            res.writeHead(200, { "Content-Type": "text/plain" });
+            res.end("WhatsApp webhook is running");
+            return;
+          }
 
-        // Twilio sends incoming messages as POST to this path
-        if (req.method === "POST" && req.url === "/webhook/whatsapp") {
-          await this.handleIncomingMessage(req, res);
-          return;
-        }
+          // Twilio sends incoming messages as POST to this path
+          if (req.method === "POST" && req.url === "/webhook/whatsapp") {
+            this.handleIncomingMessage(req, res).catch((err) => {
+              console.error("[WhatsApp] Unhandled webhook error:", err);
+              // Make sure we always respond so Twilio doesn't retry
+              if (!res.headersSent) {
+                res.writeHead(200, { "Content-Type": "text/xml" });
+                res.end("<Response></Response>");
+              }
+            });
+            return;
+          }
 
-        res.writeHead(404);
-        res.end();
+          res.writeHead(404);
+          res.end();
+        } catch (err) {
+          console.error("[WhatsApp] Sync webhook error:", err);
+          if (!res.headersSent) {
+            res.writeHead(500);
+            res.end();
+          }
+        }
       });
 
       server.listen(this.webhookPort, () => resolve());
@@ -194,28 +230,44 @@ export class WhatsAppClient extends EventEmitter {
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
-    // Respond to Twilio IMMEDIATELY — their webhook has a 15-second timeout.
-    // If we wait for AI processing (10-30s), Twilio times out and disconnects
-    // the sandbox session.
+    // ── Step 1: respond to Twilio IMMEDIATELY ──
+    // Their webhook has a 15-second timeout.  If we don't reply fast,
+    // Twilio marks the webhook as failed and retries, causing duplicates
+    // and eventually disconnecting the sandbox session.
     let jid = "";
     let text = "";
+    let messageSid = "";
 
     try {
       const body = await this.parseFormBody(req);
       const from = body.get("From") || "";   // "whatsapp:+971589115381"
       text = body.get("Body") || "";
+      messageSid = body.get("MessageSid") || body.get("SmsSid") || "";
       jid = this.twilioToJid(from);
 
-      console.log(`[WhatsApp] Webhook received -- From: ${from}, Body: "${text}"`);
+      console.log(`[WhatsApp] Webhook received -- SID: ${messageSid}, From: ${from}, Body: "${text}"`);
     } catch (err) {
       console.error("[WhatsApp] Webhook parse error:", err);
     }
 
-    // Send 200 OK right away so Twilio doesn't time out
+    // Always reply 200 with empty TwiML so Twilio knows we got it
     res.writeHead(200, { "Content-Type": "text/xml" });
     res.end("<Response></Response>");
 
-    // Process the message in the background (fire-and-forget)
+    // ── Step 2: deduplicate Twilio retries ──
+    // Twilio resends the same MessageSid on retry.  If we've already
+    // started processing this message, skip the duplicate.
+    if (messageSid) {
+      if (this.processedMessages.has(messageSid)) {
+        console.log(`[WhatsApp] Duplicate webhook (SID: ${messageSid}) -- ignoring`);
+        return;
+      }
+      this.processedMessages.add(messageSid);
+      // Auto-clean after TTL to prevent unbounded memory growth
+      setTimeout(() => this.processedMessages.delete(messageSid), this.DEDUP_TTL_MS);
+    }
+
+    // ── Step 3: process message in the background ──
     if (!jid) {
       console.warn("[WhatsApp] Could not parse sender JID, skipping.");
     } else if (!text) {
@@ -223,7 +275,7 @@ export class WhatsAppClient extends EventEmitter {
     } else if (!this.messageHandler) {
       console.warn("[WhatsApp] No message handler registered!");
     } else {
-      console.log(`[WhatsApp] Message from ${jid}: ${text}`);
+      console.log(`[WhatsApp] Processing message from ${jid}: ${text}`);
       this.messageHandler(jid, text).catch((err) => {
         console.error("[WhatsApp] Error handling message:", err);
       });
