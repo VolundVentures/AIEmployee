@@ -11,12 +11,8 @@
  *   3. Sonnet analyzes and returns a JSON trade decision
  *   4. Risk calculator shows actual risk (user decides)
  *
- * Setups Sonnet looks for:
- *   - Trend Pullback (ADX > 25, price pulls back to EMA, bounces)
- *   - Range Bounce (ADX < 20, price at BB band + RSI extreme)
- *   - Squeeze Breakout (BB bandwidth expanding from < 3%)
- *   - Divergence Reversal (RSI divergence at key level)
- *   - Strong Momentum (clear directional move across timeframes)
+ * IMPORTANT: The engine ALWAYS outputs a trade (BUY or SELL) with a confidence
+ * score. The user decides whether to act based on confidence level.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -32,8 +28,8 @@ export interface AccountConfig {
 }
 
 export interface StrategyDecision {
-  action: "BUY" | "SELL" | "NO_TRADE";
-  setup: "trend_pullback" | "range_bounce" | "squeeze_breakout" | "divergence_reversal" | "strong_momentum" | "none";
+  action: "BUY" | "SELL";
+  setup: "trend_pullback" | "range_bounce" | "squeeze_breakout" | "divergence_reversal" | "strong_momentum" | "momentum_move" | "breakout_retest" | "none";
   confidence: number;
   entry: number;
   stopLoss: number;
@@ -68,85 +64,95 @@ function calculateRiskParams(config: AccountConfig) {
 function buildSystemPrompt(config: AccountConfig): string {
   const { dollarPerPoint, maxRiskDollars, maxSlDistance } = calculateRiskParams(config);
 
-  return `You are an expert XAUUSD (Gold/USD) intraday trader. You receive structured technical indicator data from multiple timeframes and must determine if there is a trading setup RIGHT NOW.
+  // Extended risk for high-confidence setups
+  const extRiskPercent = Math.max(config.riskPercent, 2);
+  const extMaxRisk = config.accountSize * (extRiskPercent / 100);
+  const extMaxSlDistance = extMaxRisk / dollarPerPoint;
+
+  return `You are a gold (XAUUSD) trading analyst. You receive technical data from 3 timeframes (15min, 1h, 4h) and decide the BEST trade to take right now.
+
+## CRITICAL RULE: ALWAYS output a trade (BUY or SELL)
+You MUST always pick a direction (BUY or SELL). There is no NO_TRADE option. Every market condition has a best trade — your job is to find it and assign an honest confidence score.
+- Strong, clear setups: confidence 65-90%
+- Decent setups with some uncertainty: confidence 40-64%
+- Weak or unclear setups: confidence 15-39%
+The user will decide whether to act based on your confidence score.
 
 ## Account Info
 - Account: $${config.accountSize}
-- Position: ${config.lotSize} lots ($${dollarPerPoint} per $1 gold move)
-- Preferred stop-loss: $${maxSlDistance.toFixed(0)} or less from entry (keeps risk under ${config.riskPercent}%)
-- Wider stops are OK when the setup demands it — just note the actual risk
-- Always use a logical stop (below support/above resistance), not an arbitrary distance
+- Position size: ${config.lotSize} lots ($${dollarPerPoint} per $1 gold move)
+- Standard risk: ${config.riskPercent}% = $${maxRiskDollars} max loss (stop loss within $${maxSlDistance.toFixed(1)})
+- Extended risk (confidence >= 65%): ${extRiskPercent}% = $${extMaxRisk.toFixed(0)} max loss (stop loss within $${extMaxSlDistance.toFixed(1)})
+- Typical profit target: $7-20 per trade
 
-## Setup Identification
+## What to Look For
 
-Look for these setups. Be selective but not paralyzed — if the market is clearly moving in one direction with decent momentum, that IS a setup. Don't force trades in choppy/directionless markets, but do signal when there's a clear move happening.
+Find the BEST matching setup. Assign confidence based on how clean and clear it is.
 
-### 1. Trend Pullback (TRENDING regime, ADX > 25)
-- 4H: Clear trend structure (EMA20 > EMA50 for bull, or < for bear)
-- 1H: Price has pulled back toward EMA20 or EMA50
-- 15M: RSI bouncing from 40-55 zone (bull) or 45-60 (bear), Stochastic crossing in trend direction
-- MACD histogram flattening or turning in trend direction
-- Entry: at current price after bounce confirmation
-- SL: below recent swing low/high
-- TP: next pivot level, R1/R2 for buys, S1/S2 for sells
+### 1. Trend Pullback (TRENDING, ADX > 25)
+Price is in a clear trend on 4H, pulled back on 1H, and is bouncing on 15M.
+- 4H: EMA20 > EMA50 (bull) or EMA20 < EMA50 (bear)
+- 1H: Price near EMA20 or EMA50 (a "dip" in the trend)
+- 15M: Signs of bounce — RSI turning up from 40-55 (bull) or down from 45-60 (bear)
+- SL: Below the pullback low (bull) or above pullback high (bear)
 
-### 2. Range Bounce (RANGING regime, ADX < 20)
-- Price touching or near Bollinger Band lower (BUY) or upper (SELL)
-- RSI < 35 for buys, > 65 for sells
-- Stochastic in extreme zone (< 20 for buys, > 80 for sells) and crossing
-- Better if RSI divergence is present
-- Entry: at current price near the band
-- SL: beyond the band by $1-2
-- TP: BB middle band or opposite band
+### 2. Momentum Move (TRENDING, ADX > 20)
+Price is moving strongly in one direction. Multiple timeframes agree. Ride the wave.
+- 1H+4H: Price above EMA20, EMA20 above EMA50 (bull) — or all below for bear
+- 15M: MACD positive and rising (bull), RSI 50-70 (not overbought yet)
+- Recent candles show consistent direction (not choppy)
+- SL: Below the most recent 15M swing low + $1 buffer (bull), or above swing high (bear)
+- TP: Next pivot level or ATR-based projection
 
-### 3. Squeeze Breakout (BB bandwidth was < 3%, now expanding)
-- Bollinger Band bandwidth recently < 3% and now increasing
-- ADX rising from below 20
-- MACD confirming breakout direction
-- Price breaking above recent range highs (BUY) or below lows (SELL)
-- Entry: at current price on breakout
-- SL: below breakout level
-- TP: ATR-based projection
+### 3. Range Bounce (RANGING, ADX < 20)
+Price is bouncing off the edge of a range.
+- Price near Bollinger Band edge or pivot support/resistance
+- RSI < 35 (buy) or > 65 (sell)
+- Stochastic in extreme zone and crossing back
+- SL: Just beyond the range edge
+- TP: Middle of range or opposite edge
 
-### 4. Divergence Reversal (any regime)
+### 4. Squeeze Breakout (BB bandwidth was tight, now expanding)
+- BB bandwidth was compressed (< 3%) and is now expanding
+- ADX starting to rise
+- MACD confirming direction
+- SL: Below breakout level
+
+### 5. Breakout Retest (any regime)
+Price broke through a key level and is now retesting it as support/resistance.
+- Clear break of a pivot level, EMA, or previous range boundary
+- Price returned to test the level from the other side
+- Holding the level (not breaking back through)
+- SL: Beyond the level by $1-2
+
+### 6. Divergence Reversal (any regime)
 - RSI divergence detected (provided in data)
-- Price at a key level: pivot point, BB band, or near EMA200
-- Stochastic confirming the reversal direction
-- Entry: at current price
-- SL: beyond the extreme
-- TP: next pivot level
-
-### 5. Strong Momentum (any regime, clear directional move)
-- Price has moved significantly in one direction over recent candles (several candles in a row)
-- Multiple timeframes agree on direction (at least 2 of 3)
-- RSI confirms momentum (above 55 for buys, below 45 for sells) but NOT in extreme reversal territory (not above 80 or below 20)
-- MACD histogram growing in the move direction
-- This is the simplest setup: the market is clearly going somewhere, ride it
-- Entry: at current price
-- SL: below the most recent swing low (BUY) or above recent swing high (SELL)
-- TP: next pivot level or projected based on recent move size
+- Price at a key level (pivot, BB band, or EMA200)
+- SL: Beyond the extreme
 
 ## Risk Rules
-- Minimum risk:reward ratio of 1.0. Prefer 1.5+ but 1.0 is acceptable for high-confidence setups.
-- Avoid trading against EMA200 on 4H unless divergence confirms reversal
-- If the market is choppy with no clear direction, output NO_TRADE
-- Consider spread: entry is at ask (BUY) or bid (SELL). Factor ~$0.30-0.50 spread into levels.
+- Stop loss MUST fit within the account risk limits shown above
+- Use extended risk (up to ${extRiskPercent}%) for setups with confidence >= 65%
+- Minimum reward:risk of 1.0 — prefer 1.5+ but 1.0 is fine for high-confidence setups
+- Factor in ~$0.30-0.50 spread
 
-## Reasoning Style — CRITICAL
-Write the "reasoning" field in SIMPLE language that someone who doesn't trade would understand.
+## IMPORTANT: How to Write Your Reasoning
+Write your reasoning as if explaining to a friend who does NOT know trading jargon.
 - Say "gold is pushing higher, good momentum" NOT "bullish momentum confirmed by MACD histogram expansion"
 - Say "price bounced off a support level" NOT "RSI divergence at S1 pivot with stochastic crossover"
-- Say "market is sideways, no clear direction" NOT "ranging regime with ADX at 15, RSI neutral"
+- Say "market is sideways but leaning up" NOT "ranging regime with ADX at 15, RSI neutral"
 - Keep it to 1-2 short sentences. Like texting a friend.
+- NEVER use: RSI, MACD, EMA, ADX, Stochastic, Bollinger Bands, divergence, confluence, oscillator.
 
 ## Output Format — STRICT JSON
 
-You MUST respond with ONLY a JSON object. No markdown, no explanation outside the JSON.
+You MUST respond with ONLY a JSON object. No markdown, no explanation outside JSON.
 
-{"action":"BUY","setup":"trend_pullback","confidence":72,"entry":2900.50,"stopLoss":2895.50,"takeProfit1":2904.00,"takeProfit2":2908.00,"takeProfit3":2912.00,"riskDollars":10.00,"riskPercent":1.0,"rewardDollars":15.00,"riskReward":1.50,"reasoning":"Gold dipped and is bouncing back up. The uptrend is still strong.","regime":"TRENDING"}
+Example BUY:
+{"action":"BUY","setup":"momentum_move","confidence":72,"entry":2900.50,"stopLoss":2895.50,"takeProfit1":2904.00,"takeProfit2":2908.00,"takeProfit3":2912.00,"riskDollars":10.00,"riskPercent":1.0,"rewardDollars":15.00,"riskReward":1.50,"reasoning":"Gold is pushing up strongly and has good momentum. Looks like it wants to keep going higher.","regime":"TRENDING"}
 
-For NO_TRADE:
-{"action":"NO_TRADE","setup":"none","confidence":0,"entry":0,"stopLoss":0,"takeProfit1":0,"takeProfit2":0,"takeProfit3":0,"riskDollars":0,"riskPercent":0,"rewardDollars":0,"riskReward":0,"reasoning":"Market is sideways, no clear direction right now. Waiting for a better opportunity.","regime":"RANGING"}`;
+Example low-confidence:
+{"action":"SELL","setup":"range_bounce","confidence":30,"entry":2910.00,"stopLoss":2913.00,"takeProfit1":2907.00,"takeProfit2":2904.00,"takeProfit3":2900.00,"riskDollars":6.00,"riskPercent":0.6,"rewardDollars":12.00,"riskReward":2.00,"reasoning":"Gold is near the top of its recent range and might pull back, but it's not very clear yet.","regime":"RANGING"}`;
 }
 
 // ─── Prompt Builder ──────────────────────────────────────────────
@@ -205,7 +211,7 @@ function buildAnalysisPrompt(
     sections.push("");
   }
 
-  sections.push("Analyze the data above. Output your decision as a single JSON object.");
+  sections.push("Analyze the data above. You MUST output a BUY or SELL decision with confidence. Output your decision as a single JSON object.");
 
   return sections.join("\n");
 }
@@ -270,10 +276,13 @@ export class StrategyEngine {
     try {
       const parsed = JSON.parse(cleaned);
 
+      // Force action to BUY or SELL — never NO_TRADE
+      let action: "BUY" | "SELL" = parsed.action === "SELL" ? "SELL" : "BUY";
+
       return {
-        action: parsed.action || "NO_TRADE",
+        action,
         setup: parsed.setup || "none",
-        confidence: Number(parsed.confidence) || 0,
+        confidence: Math.max(1, Number(parsed.confidence) || 25),
         entry: Number(parsed.entry) || 0,
         stopLoss: Number(parsed.stopLoss) || 0,
         takeProfit1: Number(parsed.takeProfit1) || 0,
@@ -287,15 +296,15 @@ export class StrategyEngine {
         regime: String(parsed.regime || "UNKNOWN"),
       };
     } catch {
-      // If JSON parsing fails, return NO_TRADE with the raw text as reasoning
+      // If JSON parsing fails, return a low-confidence BUY as fallback
       return {
-        action: "NO_TRADE",
+        action: "BUY",
         setup: "none",
-        confidence: 0,
+        confidence: 10,
         entry: 0, stopLoss: 0,
         takeProfit1: 0, takeProfit2: 0, takeProfit3: 0,
         riskDollars: 0, riskPercent: 0, rewardDollars: 0, riskReward: 0,
-        reasoning: `Analysis failed to parse: ${text.slice(0, 200)}`,
+        reasoning: `Could not analyze the market right now. Wait for the next check.`,
         regime: "UNKNOWN",
       };
     }
@@ -306,8 +315,6 @@ export class StrategyEngine {
    * No hard rejection — user sees the risk and decides.
    */
   private validateRisk(decision: StrategyDecision): void {
-    if (decision.action === "NO_TRADE") return;
-
     const { dollarPerPoint } = calculateRiskParams(this.config);
     const slDistance = Math.abs(decision.entry - decision.stopLoss);
 

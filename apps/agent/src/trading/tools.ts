@@ -246,43 +246,30 @@ function formatOverview(
 
 /**
  * Format a Sonnet strategy decision as a simple WhatsApp message.
+ * Always shows a trade (BUY or SELL) with confidence level.
  */
 function formatStrategyDecision(decision: StrategyDecision, quote: MarketSnapshot): string {
   const sourceLabel = quote.source === "twelvedata" ? "spot" : "futures";
-
-  if (decision.action === "NO_TRADE") {
-    return [
-      `⚪ *No trade right now*`,
-      ``,
-      `${decision.reasoning}`,
-      ``,
-      `_${sourceLabel} data | Will check again next heartbeat_`,
-    ].join("\n");
-  }
-
   const emoji = decision.action === "BUY" ? "🟢" : "🔴";
-  const actionWord = decision.action === "BUY" ? "Buy at" : "Sell at";
-  const setupLabel = decision.setup.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-  const stars =
-    decision.confidence >= 75 ? "⭐⭐⭐" :
-    decision.confidence >= 55 ? "⭐⭐" : "⭐";
+  const actionWord = decision.action === "BUY" ? "Buy" : "Sell";
+  const slLabel = decision.action === "BUY" ? "below" : "above";
 
-  const riskWarning = decision.riskPercent > 2
-    ? `⚠️ _Higher risk trade (${decision.riskPercent.toFixed(1)}% of account)_\n`
-    : "";
+  const confidenceWord =
+    decision.confidence >= 70 ? "Strong" :
+    decision.confidence >= 50 ? "Good" :
+    decision.confidence >= 30 ? "Moderate" : "Weak";
 
   return [
-    `${emoji} *GOLD ${decision.action}* — ${setupLabel} ${stars}`,
-    `Confidence: ${decision.confidence}%`,
-    ``,
-    `📍 ${actionWord}: $${decision.entry.toFixed(2)}`,
-    `🛑 Stop: $${decision.stopLoss.toFixed(2)} (risk $${decision.riskDollars.toFixed(0)})`,
-    `🎯 Target: $${decision.takeProfit1.toFixed(2)} → $${decision.takeProfit2.toFixed(2)} → $${decision.takeProfit3.toFixed(2)}`,
-    `💰 Potential gain: $${decision.rewardDollars.toFixed(0)}`,
+    `${emoji} *${confidenceWord} ${actionWord} Signal* (${decision.confidence}%)`,
     ``,
     `${decision.reasoning}`,
     ``,
-    `${riskWarning}⚠️ _Not financial advice._`,
+    `*${actionWord} at:* $${decision.entry.toFixed(2)}`,
+    `*Stop loss:* $${decision.stopLoss.toFixed(2)} (protect yourself ${slLabel} this price)`,
+    `*Target:* $${decision.takeProfit2.toFixed(2)} (potential gain: $${decision.rewardDollars.toFixed(0)})`,
+    `Risk: $${decision.riskDollars.toFixed(0)} (${decision.riskPercent.toFixed(1)}% of account)`,
+    ``,
+    `_Not financial advice. ${sourceLabel} data._`,
   ].join("\n");
 }
 
@@ -384,29 +371,53 @@ function formatNoSignal(
   sig4h: TradingSignal,
   source: string
 ): string {
-  const dir = (s: TradingSignal) =>
-    s.direction === "BUY" ? "🟢" : s.direction === "SELL" ? "🔴" : "⚪";
-
   const sourceLabel = source === "twelvedata" ? "spot" : "futures";
-  const ind = sig1h.indicators; // use 1h for key levels
-  const regime = sig1h.indicators.regime;
-  const adxStr = isFinite(ind.adx) ? ind.adx.toFixed(1) : "N/A";
+
+  // Even in the fallback path, always pick a direction based on timeframe majority
+  const bullish = [sig15, sig1h, sig4h].filter(s => s.direction === "BUY").length;
+  const bearish = [sig15, sig1h, sig4h].filter(s => s.direction === "SELL").length;
+
+  let direction: string;
+  let emoji: string;
+  let actionWord: string;
+
+  if (bullish > bearish) {
+    direction = "leaning up";
+    emoji = "🟢";
+    actionWord = "Buy";
+  } else if (bearish > bullish) {
+    direction = "leaning down";
+    emoji = "🔴";
+    actionWord = "Sell";
+  } else {
+    // Tie — use 1h as tiebreaker, default to BUY
+    if (sig1h.direction === "SELL") {
+      direction = "slightly leaning down";
+      emoji = "🔴";
+      actionWord = "Sell";
+    } else {
+      direction = "slightly leaning up";
+      emoji = "🟢";
+      actionWord = "Buy";
+    }
+  }
+
+  // Use the best signal for entry/SL/TP
+  const best = [sig15, sig1h, sig4h]
+    .filter(s => s.direction !== "HOLD")
+    .sort((a, b) => b.confidence - a.confidence)[0] || sig1h;
 
   return [
-    `⚪ *XAUUSD — WAIT* (${regime}, no confluence)`,
+    `${emoji} *Weak ${actionWord} Signal* (${Math.max(best.confidence, 20)}%)`,
     ``,
-    `${dir(sig15)} 15min: ${sig15.direction} (${sig15.strength}, ${sig15.confidence}%) [${sig15.indicators.regime}]`,
-    `${dir(sig1h)} 1h: ${sig1h.direction} (${sig1h.strength}, ${sig1h.confidence}%) [${regime}]`,
-    `${dir(sig4h)} 4h: ${sig4h.direction} (${sig4h.strength}, ${sig4h.confidence}%) [${sig4h.indicators.regime}]`,
+    `Gold is ${direction} but the signal isn't very clear.`,
     ``,
-    `ADX: ${adxStr} | RSI: ${ind.rsi14.toFixed(1)} | Stoch: ${ind.stochK.toFixed(0)}/${ind.stochD.toFixed(0)}`,
-    `MACD: ${ind.macdHistogram > 0 ? "+" : ""}${ind.macdHistogram.toFixed(2)} | ATR: ${ind.atr14.toFixed(2)}`,
-    `BB: ${ind.bbLower.toFixed(0)} / ${ind.bbMiddle.toFixed(0)} / ${ind.bbUpper.toFixed(0)} (BW: ${isFinite(ind.bbBandwidth) ? ind.bbBandwidth.toFixed(1) + "%" : "N/A"})`,
-    `S1: $${ind.pivots.s1.toFixed(2)} | R1: $${ind.pivots.r1.toFixed(2)}`,
-    ind.divergence ? `⚡ RSI ${ind.divergence.type} divergence (${ind.divergence.strength.toFixed(2)})` : "",
+    `*${actionWord} at:* $${best.entry.toFixed(2)}`,
+    `*Stop loss:* $${best.stopLoss.toFixed(2)}`,
+    `*Target:* $${best.takeProfit2.toFixed(2)}`,
     ``,
-    `_${sourceLabel} data_`,
-  ].filter(Boolean).join("\n");
+    `_Low confidence — be careful. ${sourceLabel} data._`,
+  ].join("\n");
 }
 
 function formatSignal(
@@ -418,44 +429,51 @@ function formatSignal(
 ): string {
   const s = primary.signal;
   const emoji = s.direction === "BUY" ? "🟢" : "🔴";
-  const stars =
-    strength === "STRONG" ? "⭐⭐⭐" :
-    strength === "MODERATE" ? "⭐⭐" : "⭐";
-
   const sourceLabel = source === "twelvedata" ? "spot" : "futures";
-  const ind = s.indicators;
-  const regime = ind.regime;
-  const adxStr = isFinite(ind.adx) ? ind.adx.toFixed(1) : "N/A";
+  const actionWord = s.direction === "BUY" ? "Buy" : "Sell";
+  const slLabel = s.direction === "BUY" ? "below" : "above";
 
-  const lines = [
-    `${emoji} *XAUUSD ${s.direction}* — ${strength} ${stars} (${regime})`,
-    `Confidence: ${confidence}% | R:R ${s.riskRewardRatio.toFixed(2)}`,
+  const confidenceWord =
+    strength === "STRONG" ? "Strong" :
+    strength === "MODERATE" ? "Good" : "Moderate";
+
+  // Build a simple reason from signal reasons (strip jargon)
+  const simpleReasons = s.reasons
+    .filter(r => !r.includes("Insufficient"))
+    .slice(0, 2)
+    .map(simplifyReason)
+    .join(". ");
+
+  const reasonText = simpleReasons || `Gold is showing a ${strength.toLowerCase()} ${actionWord.toLowerCase()} setup.`;
+
+  return [
+    `${emoji} *${confidenceWord} ${actionWord} Signal* (${confidence}%)`,
     ``,
-    `📍 Entry: $${s.entry.toFixed(2)}`,
-    `🛑 SL: $${s.stopLoss.toFixed(2)}`,
-    `🎯 TP1: $${s.takeProfit1.toFixed(2)} | TP2: $${s.takeProfit2.toFixed(2)} | TP3: $${s.takeProfit3.toFixed(2)}`,
+    reasonText,
     ``,
-  ];
+    `*${actionWord} at:* $${s.entry.toFixed(2)}`,
+    `*Stop loss:* $${s.stopLoss.toFixed(2)} (protect yourself ${slLabel} this price)`,
+    `*Target:* $${s.takeProfit2.toFixed(2)}`,
+    ``,
+    `_Not financial advice. ${sourceLabel} data._`,
+  ].join("\n");
+}
 
-  // Top reasons (max 5)
-  const topReasons = s.reasons
-    .filter((r) => !r.includes("Insufficient"))
-    .slice(0, 5);
-  for (const reason of topReasons) {
-    lines.push(`• ${reason}`);
-  }
-
-  lines.push(``);
-  lines.push(`🔄 ${alignment.join(" | ")}`);
-  lines.push(`ADX: ${adxStr} | RSI: ${ind.rsi14.toFixed(1)} | ATR: ${ind.atr14.toFixed(2)}`);
-  lines.push(`S1: $${ind.pivots.s1.toFixed(0)} R1: $${ind.pivots.r1.toFixed(0)}${isFinite(ind.ema200) ? ` | EMA200: $${ind.ema200.toFixed(0)}` : ""}`);
-  if (ind.divergence) {
-    lines.push(`⚡ RSI ${ind.divergence.type} divergence (${ind.divergence.strength.toFixed(2)})`);
-  }
-  lines.push(``);
-  lines.push(`⚠️ _Max 1-2% risk. Not financial advice. ${sourceLabel} data._`);
-
-  return lines.join("\n");
+/** Strip common trading jargon from signal engine reasons for plain-English output. */
+function simplifyReason(reason: string): string {
+  return reason
+    .replace(/RSI\(\d+\)\s*at\s*[\d.]+/g, "momentum indicator")
+    .replace(/EMA\d+/g, "moving average")
+    .replace(/MACD\s*histogram[^.]*/g, "trend strength improving")
+    .replace(/Stoch(astic)?\s*[KD]\s*[\d./]+/g, "momentum")
+    .replace(/ADX\s*at\s*[\d.]+/g, "trend strength")
+    .replace(/BB\s*bandwidth[^.]*/g, "volatility")
+    .replace(/Bollinger\s*Band/gi, "price range")
+    .replace(/ATR[^.]*/g, "volatility measure")
+    .replace(/\bconfluence\b/gi, "agreement")
+    .replace(/\bdivergence\b/gi, "mismatch")
+    .replace(/\bbullish\b/gi, "upward")
+    .replace(/\bbearish\b/gi, "downward");
 }
 
 export function isTradingTool(name: string): boolean {
