@@ -39,6 +39,7 @@ import { AgentEngine } from "./agent/engine.js";
 import { XAUUSD_TRADER } from "./trading/persona.js";
 import { executeTradingTool, fetchHeartbeatData, runHeartbeatAnalysis, initStrategyEngine } from "./trading/tools.js";
 import { StrategyEngine } from "./trading/strategy-engine.js";
+import { isMarketOpen } from "./trading/indicators.js";
 
 // ─── Config ──────────────────────────────────────────────────────
 
@@ -93,6 +94,7 @@ async function main() {
 
   let heartbeatCount = 0;
   let lastHeartbeatTime = 0;
+  let marketWasOpen = true;
 
   whatsapp.onMessage(async (jid, text) => {
     try {
@@ -165,6 +167,31 @@ async function main() {
 
   async function runHeartbeat() {
     try {
+      // Skip when market is closed (weekends, daily maintenance break)
+      const market = isMarketOpen();
+      if (!market.open) {
+        if (marketWasOpen) {
+          // Market just closed — notify once
+          console.log(`[Goldie] Market closed (${market.reason}) — pausing heartbeats`);
+          if (ALERT_PHONE && whatsapp.isConnected()) {
+            await whatsapp.sendMessage(ALERT_PHONE, `💤 Market closed (${market.reason}) — Goldie is pausing. Will resume when market reopens.`);
+          }
+          marketWasOpen = false;
+        } else {
+          console.log(`[Goldie] Market still closed (${market.reason}) — skipping`);
+        }
+        return;
+      }
+
+      // Market is open — check if it just reopened
+      if (!marketWasOpen) {
+        marketWasOpen = true;
+        console.log("[Goldie] Market reopened — resuming heartbeats");
+        if (ALERT_PHONE && whatsapp.isConnected()) {
+          await whatsapp.sendMessage(ALERT_PHONE, "☀️ Market open — Goldie is back!");
+        }
+      }
+
       heartbeatCount++;
       const now = new Date();
       const timeStr = now.toLocaleTimeString("en-US", {

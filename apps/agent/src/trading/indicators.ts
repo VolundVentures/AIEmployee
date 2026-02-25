@@ -898,6 +898,50 @@ export function detectSession(candles: Candle[]): SessionInfo {
   };
 }
 
+// ─── Market Hours ───────────────────────────────────────────────
+
+/**
+ * Check if the XAUUSD market is currently open.
+ * Gold trades Sunday 23:00 UTC to Friday 22:00 UTC (continuous).
+ * Daily maintenance break: 22:00-22:59 UTC (Mon-Thu).
+ *
+ * Schedule (UTC):
+ *   Saturday      → CLOSED (all day)
+ *   Sunday 00-22  → CLOSED
+ *   Sunday 23     → OPEN (market opens)
+ *   Mon-Thu 00-21 → OPEN
+ *   Mon-Thu 22    → CLOSED (1h maintenance)
+ *   Mon-Thu 23    → OPEN
+ *   Friday 00-21  → OPEN
+ *   Friday 22+    → CLOSED (weekend begins)
+ */
+export function isMarketOpen(now?: Date): { open: boolean; reason?: string } {
+  const d = now ?? new Date();
+  const day = d.getUTCDay();    // 0=Sun, 5=Fri, 6=Sat
+  const hour = d.getUTCHours();
+
+  // Saturday: always closed
+  if (day === 6) return { open: false, reason: "weekend" };
+
+  // Sunday: closed until 23:00 UTC
+  if (day === 0) {
+    if (hour >= 23) return { open: true };
+    return { open: false, reason: "weekend" };
+  }
+
+  // Friday: closed after 22:00 UTC
+  if (day === 5) {
+    if (hour < 22) return { open: true };
+    return { open: false, reason: "weekend" };
+  }
+
+  // Mon-Thu: maintenance break at 22:00 UTC
+  if (hour === 22) return { open: false, reason: "daily maintenance break (22:00-23:00 UTC)" };
+
+  // Mon-Thu outside maintenance: open
+  return { open: true };
+}
+
 // ─── Liquidity Levels ───────────────────────────────────────────
 
 export interface LiquidityLevel {
