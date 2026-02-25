@@ -66,7 +66,7 @@ export async function executeTradingTool(
         `Bid/Ask: $${quote.bid.toFixed(2)}/$${quote.ask.toFixed(2)} (spread $${quote.spread.toFixed(2)})`,
         `24h: ${quote.change24h >= 0 ? "+" : ""}$${quote.change24h.toFixed(2)} (${quote.changePct24h >= 0 ? "+" : ""}${quote.changePct24h.toFixed(2)}%)`,
         `Range: $${quote.low24h.toFixed(2)} – $${quote.high24h.toFixed(2)}`,
-        `_Source: ${quote.source === "twelvedata" ? "Twelve Data (spot)" : "Yahoo Finance (spot)"}_`,
+        `_Source: ${quote.source === "twelvedata" ? "Twelve Data (spot)" : "Yahoo Finance (futures — get free Twelve Data key for spot)"}_`,
       ].join("\n");
     }
 
@@ -97,7 +97,8 @@ export async function executeTradingTool(
       }
 
       lines.push(``);
-      lines.push(`_Data: spot XAUUSD | ${quote.source === "twelvedata" ? "Twelve Data" : "Yahoo Finance"}_`);
+      const sourceLabel = quote.source === "twelvedata" ? "Twelve Data (spot)" : "Yahoo GC=F (futures)";
+      lines.push(`_Data: ${sourceLabel}_`);
 
       return lines.join("\n");
     }
