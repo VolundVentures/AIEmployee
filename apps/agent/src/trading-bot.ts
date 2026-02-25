@@ -38,7 +38,7 @@ dotenv.config();                                                  // cwd fallbac
 import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
 import { XAUUSD_TRADER } from "./trading/persona.js";
-import { executeTradingTool } from "./trading/tools.js";
+import { executeTradingTool, fetchHeartbeatData, runHeartbeatAnalysis } from "./trading/tools.js";
 
 // ─── Config ──────────────────────────────────────────────────────
 
@@ -163,11 +163,10 @@ async function main() {
 
       console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} at ${timeStr} GST (${elapsedSinceLast})...`);
 
-      // 1. Fetch market data directly — no AI cost for data gathering
-      const [signalResult, overviewResult] = await Promise.all([
-        executeTradingTool("generate_signal", {}),
-        executeTradingTool("get_market_overview", {}),
-      ]);
+      // 1. Fetch all market data ONCE (5 API calls, not 9)
+      //    This stays within Twelve Data's 8 req/min free tier limit.
+      const hbData = await fetchHeartbeatData();
+      const { signalResult, overviewResult } = runHeartbeatAnalysis(hbData);
 
       // 2. Build prompt with raw data — AI analyzes with memory context
       const prompt = [
