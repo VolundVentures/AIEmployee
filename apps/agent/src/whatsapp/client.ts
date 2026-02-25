@@ -194,37 +194,40 @@ export class WhatsAppClient extends EventEmitter {
     req: IncomingMessage,
     res: ServerResponse
   ): Promise<void> {
+    // Respond to Twilio IMMEDIATELY — their webhook has a 15-second timeout.
+    // If we wait for AI processing (10-30s), Twilio times out and disconnects
+    // the sandbox session.
+    let jid = "";
+    let text = "";
+
     try {
       const body = await this.parseFormBody(req);
       const from = body.get("From") || "";   // "whatsapp:+971589115381"
-      const text = body.get("Body") || "";
+      text = body.get("Body") || "";
+      jid = this.twilioToJid(from);
 
       console.log(`[WhatsApp] Webhook received -- From: ${from}, Body: "${text}"`);
-
-      // Convert Twilio format → JID
-      const jid = this.twilioToJid(from);
-
-      if (!jid) {
-        console.warn("[WhatsApp] Could not parse sender JID from:", from);
-      } else if (!text) {
-        console.warn("[WhatsApp] Empty message body, ignoring.");
-      } else if (!this.messageHandler) {
-        console.warn("[WhatsApp] No message handler registered!");
-      } else {
-        console.log(`[WhatsApp] Message from ${jid}: ${text}`);
-        try {
-          await this.messageHandler(jid, text);
-        } catch (err) {
-          console.error("[WhatsApp] Error handling message:", err);
-        }
-      }
     } catch (err) {
       console.error("[WhatsApp] Webhook parse error:", err);
     }
 
-    // Respond with empty TwiML (Twilio expects this; no auto-reply)
+    // Send 200 OK right away so Twilio doesn't time out
     res.writeHead(200, { "Content-Type": "text/xml" });
     res.end("<Response></Response>");
+
+    // Process the message in the background (fire-and-forget)
+    if (!jid) {
+      console.warn("[WhatsApp] Could not parse sender JID, skipping.");
+    } else if (!text) {
+      console.warn("[WhatsApp] Empty message body, ignoring.");
+    } else if (!this.messageHandler) {
+      console.warn("[WhatsApp] No message handler registered!");
+    } else {
+      console.log(`[WhatsApp] Message from ${jid}: ${text}`);
+      this.messageHandler(jid, text).catch((err) => {
+        console.error("[WhatsApp] Error handling message:", err);
+      });
+    }
   }
 
   private parseFormBody(req: IncomingMessage): Promise<URLSearchParams> {
