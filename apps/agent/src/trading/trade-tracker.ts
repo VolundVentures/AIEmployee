@@ -280,6 +280,18 @@ export class TradeTracker {
       if (stats.streakCount >= 2) lines.push(`Current streak: ${stats.streakCount} ${stats.streakType}s in a row`);
     }
 
+    // Session performance
+    const sessionStats: Record<string, { wins: number; total: number }> = {};
+    for (const s of this.signals.filter(s => s.outcome === "win" || s.outcome === "loss")) {
+      if (!sessionStats[s.session]) sessionStats[s.session] = { wins: 0, total: 0 };
+      sessionStats[s.session].total++;
+      if (s.outcome === "win") sessionStats[s.session].wins++;
+    }
+    const sessionEntries = Object.entries(sessionStats).filter(([, v]) => v.total >= 2);
+    if (sessionEntries.length > 0) {
+      lines.push(`Session performance: ${sessionEntries.map(([k, v]) => `${k.replace(/_/g, " ")} ${((v.wins / v.total) * 100).toFixed(0)}% (${v.total})`).join(" | ")}`);
+    }
+
     // Recent signals (critical for consistency)
     lines.push("");
     lines.push("### Recent Signals (newest first)");

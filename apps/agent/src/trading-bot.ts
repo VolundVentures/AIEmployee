@@ -236,12 +236,16 @@ async function main() {
       // 1. Fetch all market data ONCE (5 API calls)
       const hbData = await fetchHeartbeatData();
 
-      // 2. Check outcomes of open signals against current price range
-      const resolved = tracker.checkOutcomes(
-        hbData.quote.price,
-        hbData.quote.high24h,
-        hbData.quote.low24h
-      );
+      // 2. Check outcomes of open signals against recent candle range
+      //    Use 5min candles from the last heartbeat interval for accurate SL/TP detection
+      const recentCandles = hbData.candles5min.candles.slice(-6); // ~30 min of 5min candles
+      let recentHigh = hbData.quote.price;
+      let recentLow = hbData.quote.price;
+      for (const c of recentCandles) {
+        if (c.high > recentHigh) recentHigh = c.high;
+        if (c.low < recentLow) recentLow = c.low;
+      }
+      const resolved = tracker.checkOutcomes(hbData.quote.price, recentHigh, recentLow);
 
       // Send outcome notifications
       if (resolved.length > 0 && ALERT_PHONE && whatsapp.isConnected()) {
@@ -265,6 +269,11 @@ async function main() {
 
       // 5. Record signal in TradeTracker (if Sonnet produced a decision)
       if (decision) {
+        const utcHour = new Date().getUTCHours();
+        const session = utcHour >= 12 && utcHour < 16 ? "london_ny_overlap"
+          : utcHour >= 7 && utcHour < 16 ? "london"
+          : utcHour >= 16 && utcHour < 21 ? "new_york"
+          : "asian";
         tracker.recordSignal({
           direction: decision.action,
           confidence: decision.confidence,
@@ -274,6 +283,7 @@ async function main() {
           takeProfit: decision.takeProfit,
           priceAtSignal: hbData.quote.price,
           reasoning: decision.reasoning,
+          session,
           regime: decision.regime,
         });
       }
