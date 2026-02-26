@@ -287,10 +287,17 @@ function buildAnalysisPrompt(
       sections.push(`Order Blocks: ${obStrs.join(" | ")}`);
     }
 
-    // Candlestick Patterns (recent)
+    // Candlestick Patterns (recent) — with directional signal
     const recentPatterns = snap.candlePatterns.slice(-3);
     if (recentPatterns.length > 0) {
-      sections.push(`Patterns: ${recentPatterns.map(p => p.type.replace(/_/g, " ")).join(", ")}`);
+      const patternStrs = recentPatterns.map(p => {
+        const name = p.type.replace(/_/g, " ");
+        const signal = p.type.includes("bullish") || p.type === "hammer" || p.type === "pin_bar_bull"
+          ? "↑" : p.type.includes("bearish") || p.type === "shooting_star" || p.type === "pin_bar_bear"
+          ? "↓" : "—";
+        return `${name} ${signal}`;
+      });
+      sections.push(`Patterns: ${patternStrs.join(", ")}`);
     }
 
     // Volume
@@ -307,6 +314,71 @@ function buildAnalysisPrompt(
     if (liqLevels.length > 0) {
       const liqStrs = liqLevels.map(l => `${l.type.replace(/_/g, " ")} $${l.price.toFixed(2)}`);
       sections.push(`Liquidity: ${liqStrs.join(" | ")}`);
+    }
+
+    sections.push("");
+  }
+
+  // ─── Cross-Timeframe Confluence Summary ─────────────────────
+  {
+    const tfData = [
+      { label: "4H", snap: snapshots.tf4h },
+      { label: "1H", snap: snapshots.tf1h },
+      { label: "15M", snap: snapshots.tf15m },
+    ];
+
+    // Structure agreement
+    const structures = tfData.map(t => t.snap.structure.structure);
+    const allBullish = structures.every(s => s === "bullish");
+    const allBearish = structures.every(s => s === "bearish");
+    const structureLine = tfData.map(t =>
+      `${t.label}:${t.snap.structure.structure.toUpperCase()}`
+    ).join(" | ");
+
+    if (allBullish) {
+      sections.push(`## ⚡ CROSS-TF CONFLUENCE: ALL BULLISH`);
+      sections.push(`Structure: ${structureLine} — strong alignment for BUY setups`);
+    } else if (allBearish) {
+      sections.push(`## ⚡ CROSS-TF CONFLUENCE: ALL BEARISH`);
+      sections.push(`Structure: ${structureLine} — strong alignment for SELL setups`);
+    } else {
+      sections.push(`## Cross-TF Structure`);
+      sections.push(`Structure: ${structureLine}`);
+    }
+
+    // Regime agreement
+    const regimes = tfData.map(t => t.snap.regime);
+    const regimeLine = tfData.map(t => `${t.label}:${t.snap.regime}`).join(" | ");
+    sections.push(`Regime: ${regimeLine}`);
+
+    // EMA alignment (are all EMA20 > EMA50 or all EMA20 < EMA50?)
+    const emaBullish = tfData.every(t => t.snap.ema20 > t.snap.ema50);
+    const emaBearish = tfData.every(t => t.snap.ema20 < t.snap.ema50);
+    if (emaBullish) {
+      sections.push(`EMA alignment: ALL bullish (EMA20 > EMA50 on every TF) — trend confirmation for BUYS`);
+    } else if (emaBearish) {
+      sections.push(`EMA alignment: ALL bearish (EMA20 < EMA50 on every TF) — trend confirmation for SELLS`);
+    }
+
+    // Structure breaks across timeframes (high significance when multi-TF)
+    const breaks = tfData.filter(t => t.snap.structure.structureBreak);
+    if (breaks.length >= 2) {
+      sections.push(`⚡ MULTI-TF STRUCTURE BREAK: ${breaks.map(t => `${t.label} at $${t.snap.structure.breakLevel.toFixed(2)}`).join(" + ")} — HIGH SIGNIFICANCE, likely trend shift`);
+    } else if (breaks.length === 1) {
+      sections.push(`Structure break: ${breaks[0].label} at $${breaks[0].snap.structure.breakLevel.toFixed(2)}`);
+    }
+
+    // Divergence across timeframes
+    const divs = tfData.filter(t => t.snap.divergence !== null);
+    if (divs.length >= 2) {
+      const divTypes = divs.map(t => `${t.label}:${t.snap.divergence!.type}`);
+      sections.push(`⚡ MULTI-TF DIVERGENCE: ${divTypes.join(" + ")} — strong reversal signal`);
+    }
+
+    // Volume confirmation
+    const spikes = tfData.filter(t => t.snap.volume.isVolumeSpike);
+    if (spikes.length > 0) {
+      sections.push(`Volume spikes: ${spikes.map(t => `${t.label} (${t.snap.volume.volumeRatio.toFixed(1)}x avg)`).join(", ")}`);
     }
 
     sections.push("");

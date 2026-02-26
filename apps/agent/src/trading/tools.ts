@@ -327,7 +327,8 @@ export async function generateSignalWithMemory(memory?: string, signalHistory?: 
 }
 
 /**
- * Generate signal from pre-fetched data using hardcoded signal engine (fallback).
+ * Generate signal from pre-fetched data using structure-aware fallback engine.
+ * Combines indicator scoring with Smart Money structure analysis.
  */
 function generateDeepSignalFromData(
   candles15: CandleData,
@@ -338,6 +339,11 @@ function generateDeepSignalFromData(
   const sig15 = signalEngine.analyze(candles15, quote);
   const sig1h = signalEngine.analyze(candles1h, quote);
   const sig4h = signalEngine.analyze(candles4h, quote);
+
+  // Compute snapshots for structure-aware enhancements
+  const snap4h = signalEngine.computeSnapshot(candles4h, quote).snapshot;
+  const snap1h = signalEngine.computeSnapshot(candles1h, quote).snapshot;
+  const snap15 = signalEngine.computeSnapshot(candles15, quote).snapshot;
 
   // ─── Cross-timeframe alignment ──────────────────────────
   const signals: { tf: string; signal: TradingSignal }[] = [
@@ -355,7 +361,19 @@ function generateDeepSignalFromData(
   }
 
   const primary = actionable[0];
-  const primaryDir = primary.signal.direction;
+  let primaryDir = primary.signal.direction;
+
+  // ─── Structure-aware direction override ─────────────────
+  // If 4H structure strongly disagrees with indicator direction, override
+  const struct4h = snap4h.structure.structure;
+  if (struct4h === "bullish" && primaryDir === "SELL" && !snap4h.structure.structureBreak) {
+    // Indicators say sell but 4H structure is bullish with no break — flip to buy if any TF agrees
+    const anyBuyTf = signals.some(s => s.signal.direction === "BUY");
+    if (anyBuyTf) primaryDir = "BUY";
+  } else if (struct4h === "bearish" && primaryDir === "BUY" && !snap4h.structure.structureBreak) {
+    const anySellTf = signals.some(s => s.signal.direction === "SELL");
+    if (anySellTf) primaryDir = "SELL";
+  }
 
   let aligned = 0;
   let conflicting = 0;
@@ -378,6 +396,25 @@ function generateDeepSignalFromData(
   else if (aligned >= 2) adjustedConfidence = Math.min(100, adjustedConfidence + 5);
   if (conflicting > 0) adjustedConfidence = Math.max(20, adjustedConfidence - 15);
 
+  // ─── Structure-aware confidence adjustments ─────────────
+  // Structure alignment bonus
+  const structures = [snap4h, snap1h, snap15].map(s => s.structure.structure);
+  const structureDir = primaryDir === "BUY" ? "bullish" : "bearish";
+  const structureAligned = structures.filter(s => s === structureDir).length;
+  if (structureAligned >= 3) adjustedConfidence = Math.min(95, adjustedConfidence + 10);
+  else if (structureAligned >= 2) adjustedConfidence = Math.min(95, adjustedConfidence + 5);
+
+  // Multi-TF structure break = high significance
+  const breakCount = [snap4h, snap1h, snap15].filter(s => s.structure.structureBreak).length;
+  if (breakCount >= 2) adjustedConfidence = Math.min(95, adjustedConfidence + 10);
+
+  // Kill zone bonus
+  if (snap15.session.isKillZone) adjustedConfidence = Math.min(95, adjustedConfidence + 5);
+
+  // Volume spike confirmation
+  const spikes = [snap4h, snap1h, snap15].filter(s => s.volume.isVolumeSpike).length;
+  if (spikes > 0) adjustedConfidence = Math.min(95, adjustedConfidence + 5);
+
   if (conflicting >= 2 || adjustedConfidence < 40) {
     return formatNoSignal(quote.price, sig15, sig1h, sig4h, quote.source);
   }
@@ -385,6 +422,41 @@ function generateDeepSignalFromData(
   let strength = primary.signal.strength;
   if (aligned >= 3 && adjustedConfidence >= 75) strength = "STRONG";
   else if (aligned >= 2 && adjustedConfidence >= 55) strength = "MODERATE";
+
+  // ─── Structure-aware SL/TP placement ────────────────────
+  // Override basic ATR-based levels with nearby structure levels
+  const bestSignal = primaryDir === primary.signal.direction ? primary.signal : sig1h;
+  if (primaryDir === "BUY") {
+    // SL: use nearest OB bottom or swing low below entry
+    const nearbyOBs = snap1h.orderBlocks
+      .filter(ob => ob.type === "bullish" && ob.top < quote.price)
+      .sort((a, b) => b.bottom - a.bottom);
+    if (nearbyOBs.length > 0 && nearbyOBs[0].bottom > bestSignal.stopLoss) {
+      bestSignal.stopLoss = nearbyOBs[0].bottom - 1; // $1 buffer
+    }
+    // TP: use nearest unfilled FVG top or OB top above entry
+    const nearbyFVGs = snap1h.fairValueGaps
+      .filter(g => !g.filled && g.type === "bearish" && g.bottom > quote.price)
+      .sort((a, b) => a.bottom - b.bottom);
+    if (nearbyFVGs.length > 0) {
+      bestSignal.takeProfit2 = nearbyFVGs[0].bottom;
+    }
+  } else {
+    // SL: use nearest OB top or swing high above entry
+    const nearbyOBs = snap1h.orderBlocks
+      .filter(ob => ob.type === "bearish" && ob.bottom > quote.price)
+      .sort((a, b) => a.top - b.top);
+    if (nearbyOBs.length > 0 && nearbyOBs[0].top < bestSignal.stopLoss) {
+      bestSignal.stopLoss = nearbyOBs[0].top + 1; // $1 buffer
+    }
+    // TP: use nearest unfilled FVG bottom or OB bottom below entry
+    const nearbyFVGs = snap1h.fairValueGaps
+      .filter(g => !g.filled && g.type === "bullish" && g.top < quote.price)
+      .sort((a, b) => b.top - a.top);
+    if (nearbyFVGs.length > 0) {
+      bestSignal.takeProfit2 = nearbyFVGs[0].top;
+    }
+  }
 
   return formatSignal(primary, strength, adjustedConfidence, alignmentDetails, quote.source);
 }

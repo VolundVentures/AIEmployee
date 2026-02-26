@@ -316,7 +316,95 @@ export class TradeTracker {
       }
     }
 
+    // Adaptive guidance from performance data
+    const guidance = this.getAdaptiveGuidance();
+    if (guidance.length > 0) {
+      lines.push("");
+      lines.push("### Performance-Based Guidance");
+      lines.push(...guidance);
+    }
+
     return lines.join("\n");
+  }
+
+  /**
+   * Generate adaptive guidance lines based on performance data.
+   * Tells Sonnet what's working and what isn't, so it can self-correct.
+   * Returns empty array if insufficient data.
+   */
+  getAdaptiveGuidance(): string[] {
+    const stats = this.getStats();
+    const resolved = stats.wins + stats.losses;
+    if (resolved < 5) return []; // need enough data to draw conclusions
+
+    const lines: string[] = [];
+
+    // Direction bias from win rates
+    const buyRate = stats.buyWinRate;
+    const sellRate = stats.sellWinRate;
+    if (Math.abs(buyRate - sellRate) >= 20) {
+      if (buyRate > sellRate) {
+        lines.push(`ADAPTIVE: BUY signals are ${buyRate.toFixed(0)}% accurate vs SELL at ${sellRate.toFixed(0)}%. Favor BUY setups when structure supports both directions.`);
+      } else {
+        lines.push(`ADAPTIVE: SELL signals are ${sellRate.toFixed(0)}% accurate vs BUY at ${buyRate.toFixed(0)}%. Favor SELL setups when structure supports both directions.`);
+      }
+    }
+
+    // Best/worst setup guidance
+    if (stats.bestSetup !== "none") {
+      lines.push(`ADAPTIVE: Best performing setup: ${stats.bestSetup}. Favor this pattern when you see it.`);
+    }
+    if (stats.worstSetup !== "none" && stats.worstSetup !== stats.bestSetup) {
+      lines.push(`ADAPTIVE: Weakest setup: ${stats.worstSetup}. Require higher confidence threshold for this pattern.`);
+    }
+
+    // Session performance guidance
+    const sessionStats: Record<string, { wins: number; total: number }> = {};
+    for (const s of this.signals.filter(s => s.outcome === "win" || s.outcome === "loss")) {
+      if (!sessionStats[s.session]) sessionStats[s.session] = { wins: 0, total: 0 };
+      sessionStats[s.session].total++;
+      if (s.outcome === "win") sessionStats[s.session].wins++;
+    }
+
+    let bestSession = "";
+    let bestSessionRate = 0;
+    let worstSession = "";
+    let worstSessionRate = 100;
+    for (const [session, data] of Object.entries(sessionStats)) {
+      if (data.total < 3) continue;
+      const rate = (data.wins / data.total) * 100;
+      if (rate > bestSessionRate) { bestSessionRate = rate; bestSession = session; }
+      if (rate < worstSessionRate) { worstSessionRate = rate; worstSession = session; }
+    }
+    if (bestSession && bestSessionRate >= 60) {
+      lines.push(`ADAPTIVE: Best session: ${bestSession.replace(/_/g, " ")} (${bestSessionRate.toFixed(0)}% win rate). Higher confidence trades here.`);
+    }
+    if (worstSession && worstSessionRate <= 40 && worstSession !== bestSession) {
+      lines.push(`ADAPTIVE: Weak session: ${worstSession.replace(/_/g, " ")} (${worstSessionRate.toFixed(0)}% win rate). Be more selective here.`);
+    }
+
+    // Losing streak warning
+    if (stats.streakType === "loss" && stats.streakCount >= 3) {
+      lines.push(`⚠️ ADAPTIVE: ${stats.streakCount}-loss streak active. Require confidence ≥ 60% and strong multi-TF alignment before signaling.`);
+    }
+
+    // Confidence calibration — are high-confidence trades actually winning?
+    const highConf = this.signals.filter(s => s.confidence >= 60 && (s.outcome === "win" || s.outcome === "loss"));
+    const lowConf = this.signals.filter(s => s.confidence < 60 && s.confidence > 0 && (s.outcome === "win" || s.outcome === "loss"));
+    if (highConf.length >= 5) {
+      const highWinRate = (highConf.filter(s => s.outcome === "win").length / highConf.length) * 100;
+      if (highWinRate < 50) {
+        lines.push(`⚠️ ADAPTIVE: High-confidence (≥60%) signals are only winning ${highWinRate.toFixed(0)}% of the time. You may be over-confident — be more critical of your setups.`);
+      }
+    }
+    if (lowConf.length >= 5) {
+      const lowWinRate = (lowConf.filter(s => s.outcome === "win").length / lowConf.length) * 100;
+      if (lowWinRate > 60) {
+        lines.push(`ADAPTIVE: Low-confidence (<60%) signals are winning ${lowWinRate.toFixed(0)}%. You may be under-confident — trust your analysis more.`);
+      }
+    }
+
+    return lines;
   }
 
   /**
