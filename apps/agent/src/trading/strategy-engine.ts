@@ -219,7 +219,8 @@ function buildAnalysisPrompt(
   snapshots: MultiTfSnapshots,
   recentCandles: Candle[],
   quote: MarketSnapshot,
-  memory: string
+  memory: string,
+  signalHistory?: string
 ): string {
   const sections: string[] = [];
 
@@ -324,14 +325,20 @@ function buildAnalysisPrompt(
     sections.push("");
   }
 
-  // Memory context
+  // Signal history + performance (from TradeTracker)
+  if (signalHistory) {
+    sections.push(signalHistory);
+    sections.push("");
+  }
+
+  // Memory context (heartbeat summaries)
   if (memory) {
     sections.push("## Previous Analysis");
     sections.push(memory);
     sections.push("");
   }
 
-  sections.push("Analyze ALL data above using Smart Money methodology. Output BUY or SELL with confidence as a single JSON object.");
+  sections.push("Analyze ALL data above using Smart Money methodology. Consider your recent signal history for consistency — only reverse direction if there is clear structural evidence. Output BUY or SELL with confidence as a single JSON object.");
 
   return sections.join("\n");
 }
@@ -356,9 +363,10 @@ export class StrategyEngine {
     snapshots: MultiTfSnapshots,
     recentCandles: Candle[],
     quote: MarketSnapshot,
-    memory: string = ""
+    memory: string = "",
+    signalHistory?: string
   ): Promise<{ decision: StrategyDecision; tokensIn: number; tokensOut: number; cost: number }> {
-    const prompt = buildAnalysisPrompt(snapshots, recentCandles, quote, memory);
+    const prompt = buildAnalysisPrompt(snapshots, recentCandles, quote, memory, signalHistory);
 
     const response = await this.anthropic.messages.create({
       model: "claude-sonnet-4-6",

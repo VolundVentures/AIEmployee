@@ -7,3 +7,6 @@ export type { TradingSignal, SignalDirection, SignalStrength, IndicatorSnapshot 
 export { XAUUSD_TRADER } from "./persona.js";
 
 export { TRADING_TOOLS, executeTradingTool, isTradingTool } from "./tools.js";
+
+export { TradeTracker } from "./trade-tracker.js";
+export type { TrackedSignal, TradeStats } from "./trade-tracker.js";

@@ -129,10 +129,11 @@ export async function fetchHeartbeatData(): Promise<HeartbeatData> {
  * Uses Sonnet strategy engine if available, falls back to hardcoded signal engine.
  * Returns { signalResult, overviewResult, strategyCost }.
  */
-export async function runHeartbeatAnalysis(data: HeartbeatData, memory?: string): Promise<{
+export async function runHeartbeatAnalysis(data: HeartbeatData, memory?: string, signalHistory?: string): Promise<{
   signalResult: string;
   overviewResult: string;
   strategyCost: number;
+  decision?: { action: "BUY" | "SELL"; confidence: number; setup: string; entry: number; stopLoss: number; takeProfit: number; reasoning: string; regime: string };
 }> {
   const overviewResult = formatOverview(
     {
@@ -148,12 +149,13 @@ export async function runHeartbeatAnalysis(data: HeartbeatData, memory?: string)
   if (strategyEngine) {
     try {
       const result = await runStrategyAnalysis(
-        data.candles15min, data.candles1h, data.candles4h, data.quote, memory
+        data.candles15min, data.candles1h, data.candles4h, data.quote, memory, signalHistory
       );
       return {
         signalResult: result.formatted,
         overviewResult,
         strategyCost: result.cost,
+        decision: result.decision,
       };
     } catch (err) {
       console.warn("[Tools] Strategy engine failed, falling back to signal engine:",
@@ -175,8 +177,9 @@ async function runStrategyAnalysis(
   candles1h: CandleData,
   candles4h: CandleData,
   quote: MarketSnapshot,
-  memory?: string
-): Promise<{ formatted: string; cost: number }> {
+  memory?: string,
+  signalHistory?: string
+): Promise<{ formatted: string; cost: number; decision: { action: "BUY" | "SELL"; confidence: number; setup: string; entry: number; stopLoss: number; takeProfit: number; reasoning: string; regime: string } }> {
   if (!strategyEngine) throw new Error("Strategy engine not initialized");
 
   // Compute indicator snapshots via signal engine (free, instant)
@@ -184,12 +187,13 @@ async function runStrategyAnalysis(
   const snap1h = signalEngine.computeSnapshot(candles1h, quote);
   const snap4h = signalEngine.computeSnapshot(candles4h, quote);
 
-  // Call Sonnet for strategy analysis
+  // Call Sonnet for strategy analysis with signal history for consistency
   const result = await strategyEngine.analyze(
     { tf15m: snap15.snapshot, tf1h: snap1h.snapshot, tf4h: snap4h.snapshot },
     candles15.candles,
     quote,
-    memory || ""
+    memory || "",
+    signalHistory
   );
 
   console.log(
@@ -198,7 +202,20 @@ async function runStrategyAnalysis(
   );
 
   const formatted = formatStrategyDecision(result.decision, quote);
-  return { formatted, cost: result.cost };
+  return {
+    formatted,
+    cost: result.cost,
+    decision: {
+      action: result.decision.action,
+      confidence: result.decision.confidence,
+      setup: result.decision.setup,
+      entry: result.decision.entry,
+      stopLoss: result.decision.stopLoss,
+      takeProfit: result.decision.takeProfit2,
+      reasoning: result.decision.reasoning,
+      regime: result.decision.regime,
+    },
+  };
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────
@@ -288,7 +305,7 @@ async function generateDeepSignal(): Promise<string> {
  * When memory is provided, Sonnet sees recent heartbeat summaries
  * and produces signals consistent with its own recent analysis.
  */
-export async function generateSignalWithMemory(memory?: string): Promise<string> {
+export async function generateSignalWithMemory(memory?: string, signalHistory?: string): Promise<string> {
   const [candles15, candles1h, candles4h, quote] = await Promise.all([
     marketData.getCandles("15min", 100),
     marketData.getCandles("1h", 250),
@@ -298,7 +315,7 @@ export async function generateSignalWithMemory(memory?: string): Promise<string>
 
   if (strategyEngine) {
     try {
-      const result = await runStrategyAnalysis(candles15, candles1h, candles4h, quote, memory);
+      const result = await runStrategyAnalysis(candles15, candles1h, candles4h, quote, memory, signalHistory);
       return result.formatted;
     } catch (err) {
       console.warn("[Tools] Strategy engine failed on demand, using fallback:",

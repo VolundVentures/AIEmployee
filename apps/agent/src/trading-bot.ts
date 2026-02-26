@@ -1,38 +1,30 @@
 /**
  * XAUUSD Trading Signal Bot -- Entry Point
  *
- * This is a standalone bot that:
- *   1. Connects to WhatsApp via Twilio
- *   2. Runs a heartbeat every 15 minutes: full AI-powered analysis with memory
- *   3. Sends actionable trade signals + market context automatically
- *   4. Also responds to on-demand requests (ask for price, analysis, etc.)
- *
- * The heartbeat is the core loop:
- *   - Signal engine produces structured signal (no AI cost)
- *   - Haiku adds 2-3 sentences of context (cheap, fast — compares with memory)
- *   - Combined message sent via WhatsApp
- *   - Summary saved to memory for continuity across heartbeats
+ * Intelligence layers:
+ *   1. TradeTracker — records every signal, checks outcomes (win/loss/expired),
+ *      computes stats (win rate, best setup, streak), feeds history to Sonnet
+ *   2. Signal History — Sonnet sees its own recent decisions + outcomes,
+ *      naturally stays consistent and learns what works
+ *   3. Enriched Prompt — all computed data (PDH/PDL, liquidity, patterns,
+ *      kill zone, volume) fed to Sonnet alongside signal history
+ *   4. Adaptive Stats — win rates by direction/setup fed back so Sonnet
+ *      favors strategies that are actually working
+ *   5. Trade Monitoring — open positions checked against live price every heartbeat
  *
  * Usage:
  *   ANTHROPIC_API_KEY=... ALERT_PHONE=... npm run trading-bot
- *
- * Environment variables:
- *   ANTHROPIC_API_KEY       -- Claude API key
- *   TWELVE_DATA_API_KEY     -- (optional) Twelve Data API key for better data
- *   ALERT_PHONE             -- Phone to receive signals (e.g. 971501234567@s.whatsapp.net)
- *   HEARTBEAT_INTERVAL_MINS -- How often to run full analysis (default: 15)
  */
 
 import dotenv from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
-// Load .env from multiple locations (monorepo root, apps/agent, or script dir)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-dotenv.config({ path: resolve(__dirname, "../../../.env") });   // monorepo root
-dotenv.config({ path: resolve(__dirname, "../.env") });          // apps/agent/
-dotenv.config();                                                  // cwd fallback
+dotenv.config({ path: resolve(__dirname, "../../../.env") });
+dotenv.config({ path: resolve(__dirname, "../.env") });
+dotenv.config();
 
 import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
@@ -40,11 +32,13 @@ import { XAUUSD_TRADER } from "./trading/persona.js";
 import { executeTradingTool, fetchHeartbeatData, runHeartbeatAnalysis, initStrategyEngine, generateSignalWithMemory } from "./trading/tools.js";
 import { StrategyEngine } from "./trading/strategy-engine.js";
 import { isMarketOpen } from "./trading/indicators.js";
+import { TradeTracker } from "./trading/trade-tracker.js";
 
 // ─── Config ──────────────────────────────────────────────────────
 
 const ALERT_PHONE = process.env.ALERT_PHONE || "";
 const HEARTBEAT_INTERVAL = (parseInt(process.env.HEARTBEAT_INTERVAL_MINS || "15", 10)) * 60 * 1000;
+const LOT_SIZE = parseFloat(process.env.LOT_SIZE || "0.02");
 
 // ─── Main ────────────────────────────────────────────────────────
 
@@ -52,8 +46,8 @@ async function main() {
   console.log(`
     ╔═══════════════════════════════════════════╗
     ║    🥇 GOLDIE -- XAUUSD TRADING BOT 🥇     ║
-    ║    AI Employee by Volund Ventures          ║
-    ║    ♥ Heartbeat mode                        ║
+    ║    Volund Ventures                         ║
+    ║    ♥ Heartbeat + AI Intelligence           ║
     ╚═══════════════════════════════════════════╝
   `);
 
@@ -73,34 +67,34 @@ async function main() {
     console.warn("[Goldie] Set ALERT_PHONE=<your-number>@s.whatsapp.net to receive WhatsApp alerts.");
   }
 
-  // Initialize
-  // Use EMPLOYEE_ID from env (must be a valid UUID for memory persistence)
-  const agent = new AgentEngine(process.env.ANTHROPIC_API_KEY, XAUUSD_TRADER, process.env.EMPLOYEE_ID);
-  const whatsapp = new WhatsAppClient("./baileys_auth_goldie");
+  // ─── Initialize ─────────────────────────────────────────
 
-  // Initialize Sonnet strategy engine for AI-powered trade decisions
+  const employeeId = process.env.EMPLOYEE_ID || "";
+  const agent = new AgentEngine(process.env.ANTHROPIC_API_KEY, XAUUSD_TRADER, employeeId);
+  const whatsapp = new WhatsAppClient("./baileys_auth_goldie");
+  const tracker = new TradeTracker(employeeId, LOT_SIZE);
+
   const strategyEngineInstance = new StrategyEngine(process.env.ANTHROPIC_API_KEY!, {
     accountSize: parseInt(process.env.ACCOUNT_SIZE || "1000"),
-    lotSize: parseFloat(process.env.LOT_SIZE || "0.02"),
+    lotSize: LOT_SIZE,
     riskPercent: parseFloat(process.env.RISK_PERCENT || "1"),
   });
   initStrategyEngine(strategyEngineInstance);
-  console.log(`[Goldie] Strategy engine: Sonnet 4.6 | Account: $${process.env.ACCOUNT_SIZE || "1000"} | Lot: ${process.env.LOT_SIZE || "0.02"} | Risk: ${process.env.RISK_PERCENT || "1"}%`);
 
+  console.log(`[Goldie] Strategy engine: Sonnet 4.6 | Account: $${process.env.ACCOUNT_SIZE || "1000"} | Lot: ${LOT_SIZE} | Risk: ${process.env.RISK_PERCENT || "1"}%`);
   console.log(`[Goldie] Heartbeat interval: ${HEARTBEAT_INTERVAL / 60000} minutes`);
   console.log(`[Goldie] Alert phone: ${ALERT_PHONE || "(none -- console only)"}`);
+
+  const stats = tracker.getStats();
+  if (stats.totalSignals > 0) {
+    console.log(`[Goldie] Trade history: ${stats.totalSignals} signals, ${stats.wins}W/${stats.losses}L (${stats.winRate.toFixed(0)}% win rate)`);
+  }
 
   // ─── Handle incoming WhatsApp messages ─────────────────
 
   let heartbeatCount = 0;
   let lastHeartbeatTime = 0;
   let marketWasOpen = true;
-
-  // ─── Signal cache ────────────────────────────────────
-  // The heartbeat is the "source of truth" for signals.
-  // On-demand queries reuse the cached result to avoid contradictions.
-  let cachedSignal = "";
-  let cachedSignalTime = 0;
 
   whatsapp.onMessage(async (jid, text) => {
     try {
@@ -115,22 +109,14 @@ async function main() {
       }
 
       if (lower === "signal" || lower === "s" || lower === "analyze") {
-        const age = Date.now() - cachedSignalTime;
-        if (cachedSignal && age < HEARTBEAT_INTERVAL) {
-          // Reuse the latest heartbeat analysis — same source of truth
-          const minsAgo = Math.round(age / 60000);
-          await whatsapp.sendMessage(jid, cachedSignal + `\n\n_From heartbeat ${minsAgo}m ago. Type *hb* for fresh analysis._`);
-        } else {
-          // No recent heartbeat — run fresh analysis WITH memory context
-          let memCtx = "";
-          if (agent.isMemoryEnabled()) {
-            try { memCtx = await agent.getMemory().getContextString() || ""; } catch { /* non-fatal */ }
-          }
-          const result = await generateSignalWithMemory(memCtx);
-          cachedSignal = result;
-          cachedSignalTime = Date.now();
-          await whatsapp.sendMessage(jid, result);
+        // Fresh analysis with BOTH memory + signal history for consistency
+        let memCtx = "";
+        if (agent.isMemoryEnabled()) {
+          try { memCtx = await agent.getMemory().getContextString() || ""; } catch { /* */ }
         }
+        const signalHistory = tracker.formatForSonnet();
+        const result = await generateSignalWithMemory(memCtx, signalHistory);
+        await whatsapp.sendMessage(jid, result);
         return;
       }
 
@@ -147,14 +133,38 @@ async function main() {
         return;
       }
 
+      // Stats command — show trade performance
+      if (lower === "stats" || lower === "performance" || lower === "record") {
+        const s = tracker.getStats();
+        const resolved = s.wins + s.losses;
+        if (resolved === 0) {
+          await whatsapp.sendMessage(jid, "No completed trades yet. Keep running and I'll track my signals!");
+          return;
+        }
+        const msg = [
+          `📊 *Goldie Performance*`,
+          ``,
+          `*Record:* ${s.wins}W / ${s.losses}L (${s.winRate.toFixed(0)}% win rate)`,
+          `*Open:* ${s.open} | *Expired:* ${s.expired}`,
+          ``,
+          `*Buy win rate:* ${s.buyWinRate.toFixed(0)}%`,
+          `*Sell win rate:* ${s.sellWinRate.toFixed(0)}%`,
+          s.bestSetup !== "none" ? `*Best setup:* ${s.bestSetup}` : "",
+          s.streakCount >= 2 ? `*Streak:* ${s.streakCount} ${s.streakType}s in a row` : "",
+        ].filter(Boolean).join("\n");
+        await whatsapp.sendMessage(jid, msg);
+        return;
+      }
+
       if (lower === "help" || lower === "h") {
         await whatsapp.sendMessage(jid, [
           `🥇 *Goldie — XAUUSD Bot*`,
           ``,
-          `*signal* (s) — Deep trading signal`,
+          `*signal* (s) — Trading signal`,
           `*price* (p) — Current price`,
           `*overview* (o) — Multi-TF snapshot`,
           `*heartbeat* (hb) — Run analysis now`,
+          `*stats* — Win/loss record`,
           `*help* (h) — This message`,
           ``,
           `♥ Auto-heartbeat every ${HEARTBEAT_INTERVAL / 60000} min`,
@@ -177,21 +187,22 @@ async function main() {
   console.log("[Goldie] Connecting to WhatsApp...");
   await whatsapp.connect();
 
-  // ─── Heartbeat: Sonnet strategy analysis ────────────────
+  // ─── Heartbeat: AI-Powered Analysis Loop ────────────────
   //
-  // 1. Fetch market data (5 API calls)
-  // 2. Sonnet strategy engine analyzes indicators + decides trade
-  //    (replaces both hardcoded scoring AND Haiku context steps)
-  // 3. Formatted message sent via WhatsApp
-  // 4. Summary saved to memory for continuity
+  // Each heartbeat:
+  //   1. Check outcomes of open signals (did price hit SL/TP?)
+  //   2. Fetch market data (5 API calls)
+  //   3. Build signal history + stats for Sonnet
+  //   4. Sonnet analyzes with full context (data + history + memory)
+  //   5. Record new signal in TradeTracker
+  //   6. Send via WhatsApp
+  //   7. Save to memory
 
   async function runHeartbeat() {
     try {
-      // Skip when market is closed (weekends, daily maintenance break)
       const market = isMarketOpen();
       if (!market.open) {
         if (marketWasOpen) {
-          // Market just closed — notify once
           console.log(`[Goldie] Market closed (${market.reason}) — pausing heartbeats`);
           if (ALERT_PHONE && whatsapp.isConnected()) {
             await whatsapp.sendMessage(ALERT_PHONE, `💤 Market closed (${market.reason}) — Goldie is pausing. Will resume when market reopens.`);
@@ -203,7 +214,6 @@ async function main() {
         return;
       }
 
-      // Market is open — check if it just reopened
       if (!marketWasOpen) {
         marketWasOpen = true;
         console.log("[Goldie] Market reopened — resuming heartbeats");
@@ -226,24 +236,49 @@ async function main() {
       // 1. Fetch all market data ONCE (5 API calls)
       const hbData = await fetchHeartbeatData();
 
-      // 2. Get memory context for Sonnet (what happened in recent heartbeats)
+      // 2. Check outcomes of open signals against current price range
+      const resolved = tracker.checkOutcomes(
+        hbData.quote.price,
+        hbData.quote.high24h,
+        hbData.quote.low24h
+      );
+
+      // Send outcome notifications
+      if (resolved.length > 0 && ALERT_PHONE && whatsapp.isConnected()) {
+        const outcomeMsg = tracker.formatOutcomeMessage(resolved);
+        if (outcomeMsg) {
+          await whatsapp.sendMessage(ALERT_PHONE, outcomeMsg);
+        }
+      }
+
+      // 3. Build context for Sonnet
       let memoryContext = "";
       if (agent.isMemoryEnabled()) {
         try {
           memoryContext = await agent.getMemory().getContextString() || "";
-        } catch {
-          // Non-fatal
-        }
+        } catch { /* */ }
+      }
+      const signalHistory = tracker.formatForSonnet();
+
+      // 4. Run Sonnet strategy analysis with full context
+      const { signalResult, strategyCost, decision } = await runHeartbeatAnalysis(hbData, memoryContext, signalHistory);
+
+      // 5. Record signal in TradeTracker (if Sonnet produced a decision)
+      if (decision) {
+        tracker.recordSignal({
+          direction: decision.action,
+          confidence: decision.confidence,
+          setup: decision.setup,
+          entry: decision.entry,
+          stopLoss: decision.stopLoss,
+          takeProfit: decision.takeProfit,
+          priceAtSignal: hbData.quote.price,
+          reasoning: decision.reasoning,
+          regime: decision.regime,
+        });
       }
 
-      // 3. Run Sonnet strategy analysis (or fallback to signal engine)
-      const { signalResult, strategyCost } = await runHeartbeatAnalysis(hbData, memoryContext);
-
-      // Cache the signal so on-demand queries stay consistent
-      cachedSignal = signalResult;
-      cachedSignalTime = Date.now();
-
-      // 4. Build message
+      // 6. Build and send message
       const q = hbData.quote;
       const changeSign = q.change24h >= 0 ? "+" : "";
       const message = [
@@ -258,7 +293,6 @@ async function main() {
         console.log(`[Goldie] ♥ Strategy cost: $${strategyCost.toFixed(4)}`);
       }
 
-      // 5. Send via WhatsApp
       if (ALERT_PHONE && whatsapp.isConnected()) {
         await whatsapp.sendMessage(ALERT_PHONE, message);
         console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} sent`);
@@ -267,7 +301,7 @@ async function main() {
         console.log(message);
       }
 
-      // 6. Save summary to memory for continuity
+      // 7. Save to memory
       if (agent.isMemoryEnabled()) {
         try {
           const signalFirstLine = signalResult.split("\n")[0];
@@ -276,9 +310,7 @@ async function main() {
             "task_outcome",
             { heartbeat: heartbeatCount, time: now.toISOString() }
           );
-        } catch {
-          // Non-fatal
-        }
+        } catch { /* */ }
       }
 
       lastHeartbeatTime = now.getTime();
@@ -290,12 +322,13 @@ async function main() {
   // ─── Startup ───────────────────────────────────────────
 
   if (ALERT_PHONE && whatsapp.isConnected()) {
-    console.log("[Goldie] Sending startup message...");
+    const s = tracker.getStats();
+    const record = s.wins + s.losses > 0 ? ` | Record: ${s.wins}W/${s.losses}L` : "";
     await whatsapp.sendMessage(
       ALERT_PHONE,
       [
         `🥇 *Goldie is online!*`,
-        `♥ Heartbeat: every ${HEARTBEAT_INTERVAL / 60000} min`,
+        `♥ Heartbeat: every ${HEARTBEAT_INTERVAL / 60000} min${record}`,
         `Type *help* for commands`,
       ].join("\n")
     );
