@@ -277,20 +277,28 @@ function formatStrategyDecision(decision: StrategyDecision, quote: MarketSnapsho
 
 /**
  * Generate signal by fetching data (for on-demand queries).
- * Uses strategy engine if available, otherwise falls back to hardcoded.
+ * Delegates to generateSignalWithMemory (no memory context).
  */
 async function generateDeepSignal(): Promise<string> {
+  return generateSignalWithMemory();
+}
+
+/**
+ * Generate signal with optional memory context for consistency.
+ * When memory is provided, Sonnet sees recent heartbeat summaries
+ * and produces signals consistent with its own recent analysis.
+ */
+export async function generateSignalWithMemory(memory?: string): Promise<string> {
   const [candles15, candles1h, candles4h, quote] = await Promise.all([
     marketData.getCandles("15min", 100),
-    marketData.getCandles("1h", 250),   // 250 for EMA200
-    marketData.getCandles("4h", 250),   // 250 for EMA200
+    marketData.getCandles("1h", 250),
+    marketData.getCandles("4h", 250),
     marketData.getQuote(),
   ]);
 
-  // Try strategy engine first
   if (strategyEngine) {
     try {
-      const result = await runStrategyAnalysis(candles15, candles1h, candles4h, quote);
+      const result = await runStrategyAnalysis(candles15, candles1h, candles4h, quote, memory);
       return result.formatted;
     } catch (err) {
       console.warn("[Tools] Strategy engine failed on demand, using fallback:",

@@ -37,7 +37,7 @@ dotenv.config();                                                  // cwd fallbac
 import { WhatsAppClient } from "./whatsapp/client.js";
 import { AgentEngine } from "./agent/engine.js";
 import { XAUUSD_TRADER } from "./trading/persona.js";
-import { executeTradingTool, fetchHeartbeatData, runHeartbeatAnalysis, initStrategyEngine } from "./trading/tools.js";
+import { executeTradingTool, fetchHeartbeatData, runHeartbeatAnalysis, initStrategyEngine, generateSignalWithMemory } from "./trading/tools.js";
 import { StrategyEngine } from "./trading/strategy-engine.js";
 import { isMarketOpen } from "./trading/indicators.js";
 
@@ -96,6 +96,12 @@ async function main() {
   let lastHeartbeatTime = 0;
   let marketWasOpen = true;
 
+  // ─── Signal cache ────────────────────────────────────
+  // The heartbeat is the "source of truth" for signals.
+  // On-demand queries reuse the cached result to avoid contradictions.
+  let cachedSignal = "";
+  let cachedSignalTime = 0;
+
   whatsapp.onMessage(async (jid, text) => {
     try {
       console.log(`[Goldie] Message from ${jid}: ${text}`);
@@ -109,8 +115,22 @@ async function main() {
       }
 
       if (lower === "signal" || lower === "s" || lower === "analyze") {
-        const result = await executeTradingTool("generate_signal", {});
-        await whatsapp.sendMessage(jid, result);
+        const age = Date.now() - cachedSignalTime;
+        if (cachedSignal && age < HEARTBEAT_INTERVAL) {
+          // Reuse the latest heartbeat analysis — same source of truth
+          const minsAgo = Math.round(age / 60000);
+          await whatsapp.sendMessage(jid, cachedSignal + `\n\n_From heartbeat ${minsAgo}m ago. Type *hb* for fresh analysis._`);
+        } else {
+          // No recent heartbeat — run fresh analysis WITH memory context
+          let memCtx = "";
+          if (agent.isMemoryEnabled()) {
+            try { memCtx = await agent.getMemory().getContextString() || ""; } catch { /* non-fatal */ }
+          }
+          const result = await generateSignalWithMemory(memCtx);
+          cachedSignal = result;
+          cachedSignalTime = Date.now();
+          await whatsapp.sendMessage(jid, result);
+        }
         return;
       }
 
@@ -218,6 +238,10 @@ async function main() {
 
       // 3. Run Sonnet strategy analysis (or fallback to signal engine)
       const { signalResult, strategyCost } = await runHeartbeatAnalysis(hbData, memoryContext);
+
+      // Cache the signal so on-demand queries stay consistent
+      cachedSignal = signalResult;
+      cachedSignalTime = Date.now();
 
       // 4. Build message
       const q = hbData.quote;
