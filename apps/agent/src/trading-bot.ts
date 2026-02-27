@@ -236,16 +236,16 @@ async function main() {
       // 1. Fetch all market data ONCE (5 API calls)
       const hbData = await fetchHeartbeatData();
 
-      // 2. Check outcomes of open signals against recent candle range
-      //    Use 5min candles from the last heartbeat interval for accurate SL/TP detection
-      const recentCandles = hbData.candles5min.candles.slice(-6); // ~30 min of 5min candles
-      let recentHigh = hbData.quote.price;
-      let recentLow = hbData.quote.price;
-      for (const c of recentCandles) {
-        if (c.high > recentHigh) recentHigh = c.high;
-        if (c.low < recentLow) recentLow = c.low;
+      // 2. Check outcomes using FULL 5min candle history (not just recent)
+      //    This covers the entire range since the signal was created
+      const allCandles5m = hbData.candles5min.candles;
+      let periodHigh = hbData.quote.price;
+      let periodLow = hbData.quote.price;
+      for (const c of allCandles5m) {
+        if (c.high > periodHigh) periodHigh = c.high;
+        if (c.low < periodLow) periodLow = c.low;
       }
-      const resolved = tracker.checkOutcomes(hbData.quote.price, recentHigh, recentLow);
+      const resolved = tracker.checkOutcomes(hbData.quote.price, periodHigh, periodLow);
 
       // Send outcome notifications
       if (resolved.length > 0 && ALERT_PHONE && whatsapp.isConnected()) {
@@ -267,56 +267,76 @@ async function main() {
       // 4. Run Sonnet strategy analysis with full context
       const { signalResult, strategyCost, decision } = await runHeartbeatAnalysis(hbData, memoryContext, signalHistory);
 
-      // 5. Record signal in TradeTracker (if Sonnet produced a decision)
-      if (decision) {
+      const isTradeSignal = decision && (decision.action === "BUY" || decision.action === "SELL");
+
+      // 5. Record signal ONLY if it's a real trade (not HOLD)
+      if (isTradeSignal) {
         const utcHour = new Date().getUTCHours();
         const session = utcHour >= 12 && utcHour < 16 ? "london_ny_overlap"
           : utcHour >= 7 && utcHour < 16 ? "london"
           : utcHour >= 16 && utcHour < 21 ? "new_york"
           : "asian";
+
+        // Close any existing open signal in the SAME direction (don't pile up duplicates)
+        // If new signal is OPPOSITE direction, it means market flipped — keep both for tracking
+        const dir = decision!.action as "BUY" | "SELL";
+        tracker.closeStaleSignals(dir);
+
         tracker.recordSignal({
-          direction: decision.action,
-          confidence: decision.confidence,
-          setup: decision.setup,
-          entry: decision.entry,
-          stopLoss: decision.stopLoss,
-          takeProfit: decision.takeProfit,
+          direction: decision!.action as "BUY" | "SELL",
+          confidence: decision!.confidence,
+          setup: decision!.setup,
+          entry: decision!.entry,
+          stopLoss: decision!.stopLoss,
+          takeProfit: decision!.takeProfit,
           priceAtSignal: hbData.quote.price,
-          reasoning: decision.reasoning,
+          reasoning: decision!.reasoning,
           session,
-          regime: decision.regime,
+          regime: decision!.regime,
         });
       }
 
       // 6. Build and send message
       const q = hbData.quote;
       const changeSign = q.change24h >= 0 ? "+" : "";
-      const message = [
-        `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST`,
-        `💰 *$${q.price.toFixed(2)}* | ${changeSign}$${q.change24h.toFixed(2)} (${changeSign}${q.changePct24h.toFixed(2)}%)`,
-        `Range: $${q.low24h.toFixed(2)} – $${q.high24h.toFixed(2)}`,
-        ``,
-        signalResult,
-      ].join("\n");
 
       if (strategyCost > 0) {
         console.log(`[Goldie] ♥ Strategy cost: $${strategyCost.toFixed(4)}`);
       }
 
-      if (ALERT_PHONE && whatsapp.isConnected()) {
-        await whatsapp.sendMessage(ALERT_PHONE, message);
-        console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} sent`);
+      if (isTradeSignal) {
+        // Only send to WhatsApp when we have a real trade signal
+        const message = [
+          `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST`,
+          `💰 *$${q.price.toFixed(2)}* | ${changeSign}$${q.change24h.toFixed(2)} (${changeSign}${q.changePct24h.toFixed(2)}%)`,
+          `Range: $${q.low24h.toFixed(2)} – $${q.high24h.toFixed(2)}`,
+          ``,
+          signalResult,
+        ].join("\n");
+
+        if (ALERT_PHONE && whatsapp.isConnected()) {
+          await whatsapp.sendMessage(ALERT_PHONE, message);
+          console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} — SIGNAL SENT: ${decision!.action} ${decision!.confidence}%`);
+        } else {
+          console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} — SIGNAL (not sent — no phone)`);
+          console.log(message);
+        }
       } else {
-        console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} (not sent — no phone or disconnected)`);
-        console.log(message);
+        // HOLD — log but don't spam the user
+        const holdReason = decision?.reasoning || signalResult.split("\n").slice(-1)[0] || "No clear setup";
+        console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} — HOLD: ${holdReason}`);
+        console.log(`[Goldie]   Price: $${q.price.toFixed(2)} | ${changeSign}${q.changePct24h.toFixed(2)}%`);
       }
 
-      // 7. Save to memory
+      // 7. Save to memory (with richer context for Sonnet's next analysis)
       if (agent.isMemoryEnabled()) {
         try {
-          const signalFirstLine = signalResult.split("\n")[0];
+          const action = decision ? decision.action : "HOLD";
+          const conf = decision ? `${decision.confidence}%` : "";
+          const reason = decision?.reasoning || "No clear setup";
+          const memLine = `HB#${heartbeatCount} (${timeStr} GST): ${action} ${conf} @ $${q.price.toFixed(2)} — ${reason}`;
           await agent.getMemory().saveMemory(
-            `HB#${heartbeatCount} (${timeStr} GST): ${signalFirstLine}`,
+            memLine,
             "task_outcome",
             { heartbeat: heartbeatCount, time: now.toISOString() }
           );

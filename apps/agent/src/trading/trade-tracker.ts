@@ -114,9 +114,37 @@ export class TradeTracker {
   }
 
   /**
-   * Check all open signals against the current price.
-   * Resolves wins (price hit TP) and losses (price hit SL).
-   * Call this at the start of every heartbeat.
+   * Close stale open signals in the same direction as a new signal.
+   * Prevents piling up duplicate signals (e.g., 4 open BUYs).
+   * Opposite-direction signals are left open for tracking.
+   */
+  closeStaleSignals(newDirection: "BUY" | "SELL"): void {
+    let closed = 0;
+    for (const signal of this.signals) {
+      if (signal.outcome === "open" && signal.direction === newDirection) {
+        signal.outcome = "expired";
+        signal.closedAt = new Date().toISOString();
+        signal.closedPrice = signal.entry; // Neutral — replaced by new signal
+        signal.pnlDollars = 0;
+        closed++;
+      }
+    }
+    if (closed > 0) {
+      this.save();
+      console.log(`[TradeTracker] Closed ${closed} stale ${newDirection} signal(s) — replaced by new signal`);
+    }
+  }
+
+  /**
+   * Check all open signals against the price range since last check.
+   *
+   * IMPORTANT: `high` and `low` should be the HIGH and LOW from the FULL
+   * candle history since the signal was created, not just the last 30 min.
+   * The caller should use all available 5min candles for accurate checking.
+   *
+   * When both SL and TP are hit in the same period (volatile move),
+   * we conservatively count it as a LOSS (SL is usually hit first
+   * during stop hunts, and being conservative improves the feedback loop).
    */
   checkOutcomes(currentPrice: number, high: number, low: number): TrackedSignal[] {
     const resolved: TrackedSignal[] = [];
@@ -125,30 +153,43 @@ export class TradeTracker {
     for (const signal of this.signals) {
       if (signal.outcome !== "open") continue;
 
-      // Expire signals older than 4 hours (price has moved too much)
+      // Expire signals older than 8 hours (gold swing trades need time)
       const ageMs = Date.now() - new Date(signal.timestamp).getTime();
-      if (ageMs > 4 * 60 * 60 * 1000) {
+      if (ageMs > 8 * 60 * 60 * 1000) {
         signal.outcome = "expired";
         signal.closedAt = new Date().toISOString();
         signal.closedPrice = currentPrice;
-        signal.pnlDollars = 0;
+        // Calculate actual P&L at expiry price
+        if (signal.direction === "BUY") {
+          signal.pnlDollars = (currentPrice - signal.entry) * dollarPerPoint;
+        } else {
+          signal.pnlDollars = (signal.entry - currentPrice) * dollarPerPoint;
+        }
         resolved.push(signal);
-        console.log(`[TradeTracker] Expired: ${signal.direction} from ${signal.timestamp}`);
+        console.log(`[TradeTracker] Expired: ${signal.direction} $${signal.entry.toFixed(2)} (${ageMs / 3600000 | 0}h, P&L: $${signal.pnlDollars.toFixed(2)})`);
         continue;
       }
 
       if (signal.direction === "BUY") {
-        // Win: high reached TP
-        if (high >= signal.takeProfit) {
+        const slHit = low <= signal.stopLoss;
+        const tpHit = high >= signal.takeProfit;
+
+        if (slHit && tpHit) {
+          // Both hit — conservatively count as LOSS (SL usually hit first in stop hunts)
+          signal.outcome = "loss";
+          signal.closedAt = new Date().toISOString();
+          signal.closedPrice = signal.stopLoss;
+          signal.pnlDollars = (signal.stopLoss - signal.entry) * dollarPerPoint;
+          resolved.push(signal);
+          console.log(`[TradeTracker] LOSS (SL+TP both hit): BUY $${signal.entry.toFixed(2)} → SL $${signal.stopLoss.toFixed(2)} ($${signal.pnlDollars.toFixed(2)})`);
+        } else if (tpHit) {
           signal.outcome = "win";
           signal.closedAt = new Date().toISOString();
           signal.closedPrice = signal.takeProfit;
           signal.pnlDollars = (signal.takeProfit - signal.entry) * dollarPerPoint;
           resolved.push(signal);
           console.log(`[TradeTracker] WIN: BUY $${signal.entry.toFixed(2)} → TP $${signal.takeProfit.toFixed(2)} (+$${signal.pnlDollars.toFixed(2)})`);
-        }
-        // Loss: low reached SL
-        else if (low <= signal.stopLoss) {
+        } else if (slHit) {
           signal.outcome = "loss";
           signal.closedAt = new Date().toISOString();
           signal.closedPrice = signal.stopLoss;
@@ -157,17 +198,24 @@ export class TradeTracker {
           console.log(`[TradeTracker] LOSS: BUY $${signal.entry.toFixed(2)} → SL $${signal.stopLoss.toFixed(2)} ($${signal.pnlDollars.toFixed(2)})`);
         }
       } else {
-        // SELL: Win if low reached TP
-        if (low <= signal.takeProfit) {
+        const slHit = high >= signal.stopLoss;
+        const tpHit = low <= signal.takeProfit;
+
+        if (slHit && tpHit) {
+          signal.outcome = "loss";
+          signal.closedAt = new Date().toISOString();
+          signal.closedPrice = signal.stopLoss;
+          signal.pnlDollars = (signal.entry - signal.stopLoss) * dollarPerPoint;
+          resolved.push(signal);
+          console.log(`[TradeTracker] LOSS (SL+TP both hit): SELL $${signal.entry.toFixed(2)} → SL $${signal.stopLoss.toFixed(2)} ($${signal.pnlDollars.toFixed(2)})`);
+        } else if (tpHit) {
           signal.outcome = "win";
           signal.closedAt = new Date().toISOString();
           signal.closedPrice = signal.takeProfit;
           signal.pnlDollars = (signal.entry - signal.takeProfit) * dollarPerPoint;
           resolved.push(signal);
           console.log(`[TradeTracker] WIN: SELL $${signal.entry.toFixed(2)} → TP $${signal.takeProfit.toFixed(2)} (+$${signal.pnlDollars.toFixed(2)})`);
-        }
-        // SELL: Loss if high reached SL
-        else if (high >= signal.stopLoss) {
+        } else if (slHit) {
           signal.outcome = "loss";
           signal.closedAt = new Date().toISOString();
           signal.closedPrice = signal.stopLoss;

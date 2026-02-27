@@ -133,7 +133,7 @@ export async function runHeartbeatAnalysis(data: HeartbeatData, memory?: string,
   signalResult: string;
   overviewResult: string;
   strategyCost: number;
-  decision?: { action: "BUY" | "SELL"; confidence: number; setup: string; entry: number; stopLoss: number; takeProfit: number; reasoning: string; regime: string };
+  decision?: { action: "BUY" | "SELL" | "HOLD"; confidence: number; setup: string; entry: number; stopLoss: number; takeProfit: number; reasoning: string; regime: string };
 }> {
   const overviewResult = formatOverview(
     {
@@ -179,7 +179,7 @@ async function runStrategyAnalysis(
   quote: MarketSnapshot,
   memory?: string,
   signalHistory?: string
-): Promise<{ formatted: string; cost: number; decision: { action: "BUY" | "SELL"; confidence: number; setup: string; entry: number; stopLoss: number; takeProfit: number; reasoning: string; regime: string } }> {
+): Promise<{ formatted: string; cost: number; decision: { action: "BUY" | "SELL" | "HOLD"; confidence: number; setup: string; entry: number; stopLoss: number; takeProfit: number; reasoning: string; regime: string } }> {
   if (!strategyEngine) throw new Error("Strategy engine not initialized");
 
   // Compute indicator snapshots via signal engine (free, instant)
@@ -197,7 +197,7 @@ async function runStrategyAnalysis(
   );
 
   console.log(
-    `[Tools] Strategy: ${result.decision.action} (${result.decision.setup}) | ` +
+    `[Tools] Strategy: ${result.decision.action} (${result.decision.setup}) ${result.decision.confidence}% | ` +
     `${result.tokensIn}+${result.tokensOut} tokens | $${result.cost.toFixed(4)}`
   );
 
@@ -263,18 +263,33 @@ function formatOverview(
 
 /**
  * Format a Sonnet strategy decision as a simple WhatsApp message.
- * Always shows a trade (BUY or SELL) with confidence level.
+ * Shows BUY/SELL signals with confidence, or HOLD status.
  */
 function formatStrategyDecision(decision: StrategyDecision, quote: MarketSnapshot): string {
   const sourceLabel = quote.source === "twelvedata" ? "spot" : "futures";
+
+  // HOLD — no trade
+  if (decision.action === "HOLD") {
+    return [
+      `⏸️ *No Trade* — Waiting`,
+      ``,
+      `${decision.reasoning}`,
+      ``,
+      `_${sourceLabel} data._`,
+    ].join("\n");
+  }
+
   const emoji = decision.action === "BUY" ? "🟢" : "🔴";
   const actionWord = decision.action === "BUY" ? "Buy" : "Sell";
   const slLabel = decision.action === "BUY" ? "below" : "above";
 
   const confidenceWord =
-    decision.confidence >= 70 ? "Strong" :
-    decision.confidence >= 50 ? "Good" :
-    decision.confidence >= 30 ? "Moderate" : "Weak";
+    decision.confidence >= 75 ? "Strong" :
+    decision.confidence >= 60 ? "Good" :
+    decision.confidence >= 45 ? "Moderate" : "Weak";
+
+  const slDistance = Math.abs(decision.entry - decision.stopLoss);
+  const rrLabel = decision.riskReward > 0 ? ` | R:R ${decision.riskReward.toFixed(1)}:1` : "";
 
   return [
     `${emoji} *${confidenceWord} ${actionWord} Signal* (${decision.confidence}%)`,
@@ -282,8 +297,8 @@ function formatStrategyDecision(decision: StrategyDecision, quote: MarketSnapsho
     `${decision.reasoning}`,
     ``,
     `*${actionWord} at:* $${decision.entry.toFixed(2)}`,
-    `*Stop loss:* $${decision.stopLoss.toFixed(2)} (protect yourself ${slLabel} this price)`,
-    `*Target:* $${decision.takeProfit2.toFixed(2)} (potential gain: $${decision.rewardDollars.toFixed(0)})`,
+    `*Stop loss:* $${decision.stopLoss.toFixed(2)} (${slLabel}, $${slDistance.toFixed(1)} risk)`,
+    `*Target:* $${decision.takeProfit2.toFixed(2)} (gain: $${decision.rewardDollars.toFixed(0)}${rrLabel})`,
     `Risk: $${decision.riskDollars.toFixed(0)} (${decision.riskPercent.toFixed(1)}% of account)`,
     ``,
     `_Not financial advice. ${sourceLabel} data._`,
