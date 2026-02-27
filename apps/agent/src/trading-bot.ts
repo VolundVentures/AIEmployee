@@ -95,6 +95,7 @@ async function main() {
   let heartbeatCount = 0;
   let lastHeartbeatTime = 0;
   let marketWasOpen = true;
+  let consecutiveFailures = 0;
 
   whatsapp.onMessage(async (jid, text) => {
     try {
@@ -344,8 +345,20 @@ async function main() {
       }
 
       lastHeartbeatTime = now.getTime();
+      consecutiveFailures = 0;
     } catch (err) {
-      console.error("[Goldie] ♥ Heartbeat error:", err);
+      consecutiveFailures++;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[Goldie] ♥ Heartbeat error (failure #${consecutiveFailures}):`, errMsg);
+
+      // Notify user after 3 consecutive failures
+      if (consecutiveFailures === 3 && ALERT_PHONE && whatsapp.isConnected()) {
+        await whatsapp.sendMessage(ALERT_PHONE,
+          `⚠️ Goldie has failed to fetch market data ${consecutiveFailures} times in a row.\n\n` +
+          `Error: ${errMsg}\n\n` +
+          `_Will keep retrying. If this persists, check your TWELVE_DATA_API_KEY in .env._`
+        );
+      }
     }
   }
 

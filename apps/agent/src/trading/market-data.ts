@@ -4,9 +4,12 @@
  * Data sources (in priority order):
  *   1. Twelve Data API (free tier: 800 req/day) — XAU/USD spot
  *   2. Yahoo Finance GC=F (Gold Futures) — reliable fallback, ~$20-30 above spot
+ *      Tries multiple Yahoo hosts (query1, query2) with retry logic
  *
- * NOTE: Yahoo's v8 chart API does NOT support XAUUSD=X (returns empty data).
- * The only working gold ticker is GC=F (COMEX futures), used as last resort.
+ * Network resilience:
+ *   - All fetches have a 15-second timeout
+ *   - Retries up to 2 times with exponential backoff (2s, 4s)
+ *   - Multiple Yahoo Finance hosts tried in sequence
  */
 
 export interface Candle {
@@ -37,6 +40,53 @@ export interface CandleData {
   timeframe: string;
   symbol: string;
   source: string;
+}
+
+// --------------- Network helpers ---------------
+
+const FETCH_TIMEOUT_MS = 15_000;
+const MAX_RETRIES = 2;
+
+/**
+ * Fetch with timeout and retry logic.
+ * Retries on network errors (ENOTFOUND, ECONNREFUSED, ETIMEDOUT, etc.)
+ * Does NOT retry on HTTP errors (4xx, 5xx) — those are intentional rejections.
+ */
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit = {},
+  retries = MAX_RETRIES
+): Promise<Response> {
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      return response;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      // Don't retry if aborted by user (not timeout)
+      if (lastError.name === "AbortError" && attempt < retries) {
+        // Timeout — retry
+      }
+
+      if (attempt < retries) {
+        const delay = Math.pow(2, attempt + 1) * 1000; // 2s, 4s
+        console.warn(`[MarketData] Fetch attempt ${attempt + 1} failed (${lastError.message}), retrying in ${delay / 1000}s...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  throw lastError || new Error("Fetch failed after retries");
 }
 
 // --------------- Candle validation ---------------
@@ -70,7 +120,7 @@ async function fetchTwelveDataCandles(
   outputSize: number = 100
 ): Promise<Candle[]> {
   const url = `https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=${interval}&outputsize=${outputSize}&apikey=${apiKey}`;
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   const data = (await res.json()) as any;
 
   if (data.status === "error") {
@@ -102,7 +152,7 @@ async function fetchTwelveDataCandles(
 
 async function fetchTwelveDataQuote(apiKey: string): Promise<MarketSnapshot> {
   const url = `https://api.twelvedata.com/quote?symbol=XAU/USD&apikey=${apiKey}`;
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   const data = (await res.json()) as any;
 
   if (data.status === "error") {
@@ -132,19 +182,54 @@ async function fetchTwelveDataQuote(apiKey: string): Promise<MarketSnapshot> {
 // --------------- Yahoo Finance (fallback — GC=F Gold Futures) ---------------
 
 const YAHOO_SYMBOL = "GC=F";
-const YAHOO_HEADERS = { "User-Agent": "Mozilla/5.0" };
+const YAHOO_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+};
+// Try multiple Yahoo hosts — query1 often gets DNS blocked in some regions
+const YAHOO_HOSTS = [
+  "query2.finance.yahoo.com",
+  "query1.finance.yahoo.com",
+];
+
+/**
+ * Try fetching from Yahoo Finance using multiple hosts.
+ * Returns the parsed JSON response from the first host that succeeds.
+ */
+async function fetchYahooWithFallback(path: string): Promise<any> {
+  let lastError: Error | undefined;
+
+  for (const host of YAHOO_HOSTS) {
+    const url = `https://${host}${path}`;
+    try {
+      const res = await fetchWithRetry(url, { headers: YAHOO_HEADERS }, 1);
+
+      if (!res.ok) {
+        throw new Error(`Yahoo ${host} HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      const data = (await res.json()) as any;
+
+      if (data.chart?.error) {
+        throw new Error(`Yahoo ${host} API error: ${JSON.stringify(data.chart.error)}`);
+      }
+
+      return data;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      console.warn(`[MarketData] Yahoo host ${host} failed: ${lastError.message}`);
+    }
+  }
+
+  throw lastError || new Error("All Yahoo Finance hosts failed");
+}
 
 async function fetchYahooCandles(
   interval: string = "5m",
   range: string = "1d"
 ): Promise<Candle[]> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${YAHOO_SYMBOL}?interval=${interval}&range=${range}`;
-  const res = await fetch(url, { headers: YAHOO_HEADERS });
-  const data = (await res.json()) as any;
-
-  if (data.chart?.error) {
-    throw new Error(`Yahoo Finance error: ${JSON.stringify(data.chart.error)}`);
-  }
+  const data = await fetchYahooWithFallback(
+    `/v8/finance/chart/${YAHOO_SYMBOL}?interval=${interval}&range=${range}`
+  );
 
   const result = data.chart?.result?.[0];
   if (!result) throw new Error("Yahoo Finance: no data returned");
@@ -173,13 +258,9 @@ async function fetchYahooCandles(
 }
 
 async function fetchYahooQuote(): Promise<MarketSnapshot> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${YAHOO_SYMBOL}?interval=1m&range=1d`;
-  const res = await fetch(url, { headers: YAHOO_HEADERS });
-  const data = (await res.json()) as any;
-
-  if (data.chart?.error) {
-    throw new Error(`Yahoo Finance error: ${JSON.stringify(data.chart.error)}`);
-  }
+  const data = await fetchYahooWithFallback(
+    `/v8/finance/chart/${YAHOO_SYMBOL}?interval=1m&range=1d`
+  );
 
   const result = data.chart?.result?.[0];
   if (!result) throw new Error("Yahoo Finance: no quote data");
@@ -262,6 +343,9 @@ export class MarketDataProvider {
       return quote;
     } catch (err) {
       console.error("[MarketData] All quote sources failed:", err);
+      if (!apiKey) {
+        console.error("[MarketData] TIP: Set TWELVE_DATA_API_KEY in .env for a more reliable data source (free at https://twelvedata.com)");
+      }
       throw new Error("Unable to fetch XAUUSD quote from any data source");
     }
   }
@@ -301,6 +385,9 @@ export class MarketDataProvider {
       return { candles, timeframe, symbol: "XAUUSD", source: "yahoo-futures" };
     } catch (err) {
       console.error(`[MarketData] All ${timeframe} candle sources failed:`, err);
+      if (!apiKey) {
+        console.error("[MarketData] TIP: Set TWELVE_DATA_API_KEY in .env for a more reliable data source (free at https://twelvedata.com)");
+      }
       throw new Error(`Unable to fetch XAUUSD ${timeframe} candles from any data source`);
     }
   }
