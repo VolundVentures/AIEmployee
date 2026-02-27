@@ -96,6 +96,8 @@ async function main() {
   let lastHeartbeatTime = 0;
   let marketWasOpen = true;
   let consecutiveFailures = 0;
+  let consecutiveHolds = 0;
+  const HOLD_STATUS_EVERY = 4; // Send a brief WhatsApp status every N consecutive HOLDs
 
   whatsapp.onMessage(async (jid, text) => {
     try {
@@ -306,7 +308,9 @@ async function main() {
       }
 
       if (isTradeSignal) {
-        // Only send to WhatsApp when we have a real trade signal
+        consecutiveHolds = 0; // Reset HOLD counter on trade signal
+
+        // Send to WhatsApp when we have a real trade signal
         const message = [
           `♥ *HEARTBEAT #${heartbeatCount}* — ${timeStr} GST`,
           `💰 *$${q.price.toFixed(2)}* | ${changeSign}$${q.change24h.toFixed(2)} (${changeSign}${q.changePct24h.toFixed(2)}%)`,
@@ -323,10 +327,20 @@ async function main() {
           console.log(message);
         }
       } else {
-        // HOLD — log but don't spam the user
+        consecutiveHolds++;
         const holdReason = decision?.reasoning || signalResult.split("\n").slice(-1)[0] || "No clear setup";
-        console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} — HOLD: ${holdReason}`);
+        console.log(`[Goldie] ♥ Heartbeat #${heartbeatCount} — HOLD #${consecutiveHolds}: ${holdReason}`);
         console.log(`[Goldie]   Price: $${q.price.toFixed(2)} | ${changeSign}${q.changePct24h.toFixed(2)}%`);
+
+        // Send periodic status so user knows bot is alive
+        if (consecutiveHolds % HOLD_STATUS_EVERY === 0 && ALERT_PHONE && whatsapp.isConnected()) {
+          const holdHours = (consecutiveHolds * HEARTBEAT_INTERVAL / 3_600_000).toFixed(1);
+          await whatsapp.sendMessage(ALERT_PHONE, [
+            `👀 *Still watching* — ${timeStr} GST`,
+            `💰 $${q.price.toFixed(2)} (${changeSign}${q.changePct24h.toFixed(2)}%)`,
+            `No setup in the last ${holdHours}h — waiting for a good entry.`,
+          ].join("\n"));
+        }
       }
 
       // 7. Save to memory (with richer context for Sonnet's next analysis)

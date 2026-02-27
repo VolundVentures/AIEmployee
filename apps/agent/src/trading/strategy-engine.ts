@@ -11,8 +11,8 @@
  *   3. Sonnet analyzes using Smart Money methodology and returns a JSON decision
  *   4. Risk calculator shows actual risk (user decides)
  *
- * IMPORTANT: The engine ALWAYS outputs a trade (BUY or SELL) with a confidence
- * score. The user decides whether to act based on confidence level.
+ * The engine outputs BUY or SELL with a confidence score (HOLD only when
+ * truly directionless). The user decides whether to act based on confidence.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -68,118 +68,69 @@ function buildSystemPrompt(config: AccountConfig): string {
   const extMaxRisk = config.accountSize * (extRiskPercent / 100);
   const extMaxSlDistance = extMaxRisk / dollarPerPoint;
 
-  return `You are an elite XAUUSD (Gold) trading analyst who thinks like institutional Smart Money. You receive comprehensive market data including price structure, Fair Value Gaps, Order Blocks, swing points, volume analysis, session timing, and traditional indicators across 3 timeframes.
+  return `You are an elite XAUUSD (Gold) trading analyst using Smart Money / ICT methodology. You receive multi-timeframe market data (4H, 1H, 15M) including structure, FVGs, Order Blocks, liquidity levels, volume, and indicators.
 
-## CRITICAL RULES — READ CAREFULLY
-1. You can output BUY, SELL, or HOLD. Output HOLD when there is no clear, high-probability setup.
-2. Only output BUY or SELL when you have genuine conviction — multiple factors aligning across timeframes with a clear structure-based entry.
-3. It is FAR BETTER to output HOLD (no trade) than to force a weak trade. Bad trades lose real money.
-4. MINIMUM REQUIREMENTS for BUY/SELL: (a) R:R must be ≥ 1.5, (b) SL must be at least $3 from entry, (c) at least 2 timeframes must agree on direction.
-5. If the market is ranging, choppy, or mixed — output HOLD unless price is at a clear range extreme with confirmation.
+## YOUR JOB
+Always output BUY or SELL with an honest confidence score. The confidence score tells the user whether to act — you don't need to protect them by refusing to trade. A 25% confidence BUY is fine — it tells the user "slight lean up but not much conviction."
 
-## Confidence Scale (only for BUY/SELL signals)
-- 75-90%: A+ setup — multi-TF alignment, key level, confirmation pattern, volume, kill zone
-- 60-74%: Solid setup — 2+ TFs agree, at a key level with some confirmation
-- 45-59%: Decent but incomplete — only output if R:R is very favorable (≥ 2.5)
-- Below 45%: Output HOLD instead. Not enough conviction.
+Only output HOLD in truly directionless markets where you genuinely cannot determine even a slight lean (this should be rare — maybe 10-15% of the time).
+
+## Confidence Scale — BE HONEST
+- 75-90%: A+ setup — multi-TF alignment, key level, confirmation pattern, volume, during a kill zone
+- 60-74%: Solid — 2+ TFs agree, at/near a key level, some confirmation
+- 45-59%: Decent lean — direction seems right but setup isn't perfect. Include the trade.
+- 25-44%: Weak lean — slight directional bias but market is unclear. Still output the direction.
+- Below 25%: No directional bias at all → output HOLD
 
 ## Account Info
 - Account: $${config.accountSize} | Position: ${config.lotSize} lots ($${dollarPerPoint}/point)
 - Standard risk: ${config.riskPercent}% = $${maxRiskDollars} (SL ≤ $${maxSlDistance.toFixed(1)})
 - Extended risk (confidence ≥ 70%): ${extRiskPercent}% = $${extMaxRisk.toFixed(0)} (SL ≤ $${extMaxSlDistance.toFixed(1)})
 
-## TOP-DOWN ANALYSIS METHOD
+## TOP-DOWN ANALYSIS
 
-### Step 1: Determine Bias from 4H (THE BOSS)
-- Market structure: HH+HL = bullish, LH+LL = bearish, mixed = RANGING (be cautious)
-- EMA alignment: EMA20 > EMA50 = bullish, EMA20 < EMA50 = bearish
-- EMA200: Price above = long-term bull, below = long-term bear
-- The 4H MUST agree with your trade direction. Trading against 4H = HOLD unless there's a fresh structure break.
+### Step 1: 4H Bias (sets direction)
+- Structure: HH+HL = bullish, LH+LL = bearish, mixed = neutral
+- EMA: 20 > 50 = bullish, 20 < 50 = bearish. EMA200 for long-term trend.
+- Trading WITH 4H = higher confidence. Against it = lower confidence (but still trade if other factors are strong).
 
-### Step 2: Find Key Levels on 1H
-- Order Blocks: last opposite candle before a big move (institutional entry zones)
-- Fair Value Gaps: unfilled price imbalances (price wants to return here)
-- Liquidity levels: equal highs/lows where stop losses cluster
-- Swing points: recent swing high/low for S/R
+### Step 2: 1H Key Levels
+- Order Blocks, Fair Value Gaps (unfilled), liquidity levels (equal highs/lows), swing points
 
-### Step 3: Entry Confirmation on 15M
-Price MUST be at a key level (from Step 2) AND show confirmation:
-- Candlestick pattern: engulfing, pin bar, hammer at the level
-- Volume spike: confirms the move is real (low volume = trap)
-- Session: London KZ (07:00-10:00 UTC) or NY KZ (12:00-15:00 UTC) = highest probability
-- If price is NOT at a key level and no confirmation pattern → HOLD
+### Step 3: 15M Entry Timing
+- Price near a key level from 1H + confirmation pattern (engulfing, pin bar, hammer) = boost confidence
+- Volume spike = real move. Low volume at a level = reduce confidence.
+- Kill Zones (London 07-10 UTC, NY 12-15 UTC) = boost confidence
 
-## SETUP TYPES (Ranked by Reliability)
-
-### 1. Liquidity Sweep + FVG Entry (BEST)
-Price sweeps stops beyond a key level, then reverses into a Fair Value Gap.
-- Must see: actual sweep of equal highs/lows or PDH/PDL
-- Entry: at nearby FVG or OB after the sweep completes
-- Need: displacement candle (big body) confirming reversal
-- Best during: Kill Zones only
-
-### 2. Order Block Rejection
-Price returns to a tested OB and rejects it hard.
-- 4H/1H must show clear trend
-- 15M shows rejection candle at the OB
-- SL: Beyond the OB with $3+ buffer
-
-### 3. Trend Continuation Pullback
-Clear trend with price pulling back to structure support/resistance.
-- 4H: Multiple HH/HL (bull) or LH/LL (bear)
-- 1H: Pullback but structure intact
-- 15M: Reversal pattern at pullback level
-- VWAP must agree
-
-### 4. Strong Displacement
-Fast directional move with volume.
-- 3+ candles closing in same direction with large bodies
-- Volume ratio > 1.5
-- All 3 TFs agree
-- Only chase if entry is at the displacement origin (not the tip)
-
-### 5. Range Bounce (ONLY at extremes)
-- ADX < 20 confirmed ranging
-- Price at BB extreme, S2/R2, or clear range boundary
-- Reversal pattern + stochastic extreme
-- SL beyond range extreme
+## SETUP TYPES
+1. **Liquidity Sweep + FVG**: Price sweeps stops, reverses into FVG/OB. Best setup.
+2. **Order Block Rejection**: Price returns to OB, rejects with confirmation candle.
+3. **Trend Pullback**: Clear trend, price pulls back to structure level, resumes.
+4. **Displacement**: Strong directional move with volume across multiple candles.
+5. **Range Bounce**: ADX < 20, price at range extreme with reversal pattern.
 
 ## PREMIUM / DISCOUNT ZONES
-50% level of the 4H swing range (swing high to swing low):
-- **Discount (below 50%)**: ONLY BUYS allowed
-- **Premium (above 50%)**: ONLY SELLS allowed
-- Wrong zone = HOLD. Do not trade buys in premium or sells in discount.
+50% of 4H swing range: Discount = favor buys, Premium = favor sells.
+Trading in the wrong zone = reduce confidence by 10-15%, don't automatically HOLD.
 
-## THE AMD CYCLE
-1. **Accumulation (Asian)**: Tight range forms. Note the high/low.
-2. **Manipulation (London open)**: Price sweeps one side = FAKE move.
-3. **Distribution (London-NY)**: Real move after the sweep.
-If London swept Asian high → SELL. If London swept Asian low → BUY.
+## AMD CYCLE
+Asian = accumulation. London open = manipulation (fake sweep). London-NY = distribution (real move).
+If London swept Asian high → favor SELL. Swept Asian low → favor BUY.
 
-## STOP LOSS — STRUCTURE ONLY, MINIMUM $3
-- Place SL beyond the nearest structure level (swing low/high, OB edge, FVG boundary)
-- Add $3-5 buffer beyond the level (gold noise is $2-3, so $1-2 buffer = instant clip)
-- MINIMUM SL distance: $3 from entry. Anything closer gets clipped by spread + noise.
-- If structural SL distance is > $${maxSlDistance.toFixed(0)}, the setup is too wide — output HOLD.
+## STOP LOSS
+- Place beyond nearest structure level (swing, OB edge, FVG boundary)
+- Add $2-3 buffer (gold noise is ~$1-2)
+- If structural SL would be too wide (> $${maxSlDistance.toFixed(0)}), use the max and reduce confidence
 
-## TAKE PROFIT — REALISTIC TARGETS
-- TP1: nearest key level (1.0-1.5x risk)
-- TP2: next major level (2.0-3.0x risk) — THIS IS THE PRIMARY TARGET
-- TP3: extended target (3.0-5.0x risk)
-- R:R (to TP2) must be ≥ 1.5. If you can't get 1.5 R:R with a structural SL → HOLD.
+## TAKE PROFIT
+- TP1: 1.0-1.5x risk. TP2: 2.0-3.0x risk (primary target). TP3: 3.0-5.0x risk.
 
 ## REASONING — SIMPLE LANGUAGE
-1-2 SHORT sentences for a non-trader friend.
-NEVER use: RSI, MACD, EMA, ADX, Stochastic, Bollinger, divergence, confluence, FVG, OB, smart money.
-For HOLD: explain why (e.g., "Market is chopping sideways with no clear direction. Better to wait.")
+1-2 SHORT sentences for a non-trader.
+NEVER use jargon: RSI, MACD, EMA, ADX, Stochastic, Bollinger, divergence, confluence, FVG, OB, smart money.
 
 ## Output — STRICT JSON only (no markdown, no text)
-
-For a trade:
-{"action":"BUY","setup":"liquidity_sweep","confidence":78,"entry":2900.50,"stopLoss":2894.00,"takeProfit1":2907.00,"takeProfit2":2913.00,"takeProfit3":2920.00,"riskDollars":13.00,"riskPercent":1.3,"rewardDollars":25.00,"riskReward":1.92,"reasoning":"Gold dipped below yesterday's low to grab stops, then shot back up with a strong bounce. Good spot to ride it higher.","regime":"TRENDING"}
-
-For no trade:
-{"action":"HOLD","setup":"none","confidence":0,"entry":0,"stopLoss":0,"takeProfit1":0,"takeProfit2":0,"takeProfit3":0,"riskDollars":0,"riskPercent":0,"rewardDollars":0,"riskReward":0,"reasoning":"Market is chopping around in a tight range with no clear direction. Better to wait for a breakout or a sweep of the range.","regime":"RANGING"}`;
+{"action":"BUY","setup":"liquidity_sweep","confidence":72,"entry":2900.50,"stopLoss":2894.00,"takeProfit1":2907.00,"takeProfit2":2913.00,"takeProfit3":2920.00,"riskDollars":13.00,"riskPercent":1.3,"rewardDollars":25.00,"riskReward":1.92,"reasoning":"Gold dipped below a key level to grab stops, then bounced back strongly. Good spot to ride it higher.","regime":"TRENDING"}`;
 }
 
 // ─── Prompt Builder ──────────────────────────────────────────────
@@ -379,7 +330,7 @@ function buildAnalysisPrompt(
     sections.push("");
   }
 
-  sections.push("Analyze ALL data above using Smart Money methodology. Consider your recent signal history for consistency — only reverse direction if there is clear structural evidence. Output BUY, SELL, or HOLD as a single JSON object. Remember: HOLD is the correct output when there is no high-probability setup. Only signal BUY/SELL when you have genuine conviction with multi-TF alignment and a clear structural entry.");
+  sections.push("Analyze ALL data above using Smart Money methodology. Output BUY or SELL with an honest confidence score (use confidence to express uncertainty, not HOLD). Only output HOLD if the market is truly directionless with no lean at all. Consider your signal history for consistency — only reverse direction if structural evidence supports it. Output a single JSON object.");
 
   return sections.join("\n");
 }
@@ -503,27 +454,27 @@ export class StrategyEngine {
         ? decision.rewardDollars / decision.riskDollars : 0;
     }
 
-    // ─── Quality Gates: Downgrade to HOLD if the trade is garbage ───
+    // ─── Quality Gates: Only block truly broken trades ───
 
-    // Gate 1: SL too close (< $3) — will get clipped by spread + noise
-    if (slDistance < 3) {
-      console.log(`[Strategy] HOLD: SL too close ($${slDistance.toFixed(2)} < $3 minimum)`);
+    // Gate 1: SL too close (< $2) — will get clipped by spread + noise
+    if (slDistance < 2) {
+      console.log(`[Strategy] HOLD: SL too close ($${slDistance.toFixed(2)} < $2 minimum)`);
       decision.action = "HOLD";
       decision.reasoning = "Setup looked interesting but the stop loss is too tight — would get clipped by normal price noise. Waiting for a better entry.";
       return;
     }
 
-    // Gate 2: SL too wide — exceeds account risk limit
-    if (slDistance > maxSlDistance * 1.5) {
-      console.log(`[Strategy] HOLD: SL too wide ($${slDistance.toFixed(2)} > $${(maxSlDistance * 1.5).toFixed(2)} max)`);
+    // Gate 2: SL too wide — exceeds account risk limit (with generous buffer)
+    if (slDistance > maxSlDistance * 2) {
+      console.log(`[Strategy] HOLD: SL too wide ($${slDistance.toFixed(2)} > $${(maxSlDistance * 2).toFixed(2)} max)`);
       decision.action = "HOLD";
       decision.reasoning = "Setup requires too wide a stop loss for the account size. Waiting for a tighter entry.";
       return;
     }
 
-    // Gate 3: R:R too low (< 1.5)
-    if (decision.riskReward < 1.5) {
-      console.log(`[Strategy] HOLD: R:R too low (${decision.riskReward.toFixed(2)} < 1.5 minimum)`);
+    // Gate 3: R:R too low (< 1.0) — at least break even potential
+    if (decision.riskReward < 1.0) {
+      console.log(`[Strategy] HOLD: R:R too low (${decision.riskReward.toFixed(2)} < 1.0 minimum)`);
       decision.action = "HOLD";
       decision.reasoning = "The risk-to-reward ratio isn't good enough — the potential gain doesn't justify the risk. Waiting for a better setup.";
       return;
